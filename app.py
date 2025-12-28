@@ -5,6 +5,36 @@ from auditor import HabitAuditor
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Discipline Engine", layout="wide")
 
+# --- SECURITY LAYER ---
+def check_password():
+    """Returns `True` if the user had the correct password."""
+    def password_entered():
+        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # clean up
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # First run, show input
+        st.text_input(
+            "Enter Access PIN", type="password", on_change=password_entered, key="password"
+        )
+        return False
+    elif not st.session_state["password_correct"]:
+        # Password incorrect, show input again + error
+        st.text_input(
+            "Enter Access PIN", type="password", on_change=password_entered, key="password"
+        )
+        st.error("⛔ Access Denied")
+        return False
+    else:
+        # Password correct
+        return True
+
+if not check_password():
+    st.stop()  # SDE Note: This kills the script execution here. Nothing below runs.
+
 # --- INITIALIZATION ---
 try:
     auditor = HabitAuditor()
