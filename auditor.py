@@ -3,6 +3,7 @@ import datetime
 import pytz
 from dotenv import load_dotenv
 from supabase import create_client, Client
+import pandas as pd
 
 load_dotenv()
 
@@ -164,3 +165,132 @@ class HabitAuditor:
             global_streak = min_streak if rules else 0
 
         return global_streak, results
+    
+    def calculate_discipline_index(self, n_days):
+        """
+        Calculates the Weighted Moving Average using Pandas.
+        Vectorized approach: Faster and handles date gaps automatically.
+        """
+        today = self.get_today_ist()
+        start_date = today - datetime.timedelta(days=n_days - 1)
+        
+        # 1. Fetch Weights
+        rules = self.supabase.table("rules").select("id, weight").execute().data
+        if not rules: return 0.0
+        
+        weights = {r['id']: r['weight'] for r in rules}
+        total_weight = sum(weights.values())
+        if total_weight == 0: return 0.0
+
+        # 2. Fetch Logs
+        logs = self.supabase.table("logs").select("rule_id, log_date, satisfied")\
+            .gte("log_date", start_date.isoformat())\
+            .lte("log_date", today.isoformat())\
+            .execute().data
+            
+        # 3. Create DataFrame
+        df = pd.DataFrame(logs)
+        
+        # Handle Empty State (No logs in window -> Score is 0)
+        if df.empty:
+            return 0.0
+
+        # 4. Vectorized Calculation
+        df['log_date'] = pd.to_datetime(df['log_date']).dt.date
+        df['weight'] = df['rule_id'].map(weights)
+        
+        # Filter for True only, then Group by Date
+        daily_sums = df[df['satisfied'] == True].groupby('log_date')['weight'].sum()
+        
+        # 5. Reindex (The Critical Step)
+        # This creates a list of ALL dates in the window. 
+        # If a date is missing in 'daily_sums', pandas fills it with 0.0 automatically.
+        full_range = pd.date_range(start=start_date, end=today).date
+        daily_scores = daily_sums.reindex(full_range, fill_value=0.0)
+        
+        # 6. Normalize and Average
+        # (Daily Weight Sum / Total Possible Weight) * 100
+        normalized_scores = (daily_scores / total_weight) * 100
+        
+        return round(normalized_scores.mean(), 1)
+    
+    def get_trend_data(self, view_days=14):
+        """
+        Generates a DataFrame with Daily Score, 7-Day MA, and 30-Day MA.
+        Fetches extra history to ensure the Moving Averages are accurate for the viewed dates.
+        """
+        # We need 30 days of buffer data to calculate the 30-Day MA for the oldest point in our view
+        fetch_days = view_days + 30
+        today = self.get_today_ist()
+        start_date = today - datetime.timedelta(days=fetch_days)
+        
+        # 1. Fetch all weights
+        rules = self.supabase.table("rules").select("id, weight").execute().data
+        weights = {r['id']: r['weight'] for r in rules}
+        total_weight = sum(weights.values())
+        
+        # 2. Fetch logs
+        logs = self.supabase.table("logs").select("rule_id, log_date, satisfied")\
+            .gte("log_date", start_date.isoformat())\
+            .lte("log_date", today.isoformat())\
+            .execute().data
+            
+        if not logs or total_weight == 0:
+            return pd.DataFrame()
+
+        # 3. Create DataFrame
+        df = pd.DataFrame(logs)
+        df['log_date'] = pd.to_datetime(df['log_date']).dt.date
+        
+        # 4. Pivot to get Score per Day
+        # Group by Date -> Sum (Satisfied * Weight)
+        def calculate_day_score(group):
+            score = 0
+            for _, row in group.iterrows():
+                if row['satisfied']:
+                    score += weights.get(row['rule_id'], 0)
+            return round((score / total_weight) * 100, 1)
+
+        daily_scores = df.groupby('log_date').apply(calculate_day_score).reset_index(name='Daily Score')
+        
+        # 5. Reindex to fill missing dates with 0 (The Passive Fail Logic)
+        full_range = pd.date_range(start=start_date, end=today)
+        daily_scores.set_index('log_date', inplace=True)
+        daily_scores = daily_scores.reindex(full_range.date, fill_value=0.0)
+        daily_scores.index.name = 'Date'
+        
+        # 6. Calculate Moving Averages
+        daily_scores['7-Day Avg'] = daily_scores['Daily Score'].rolling(window=7, min_periods=1).mean()
+        daily_scores['30-Day Avg'] = daily_scores['Daily Score'].rolling(window=30, min_periods=1).mean()
+        
+        # 7. Return only the requested view_days
+        return daily_scores.tail(view_days)
+
+    def get_consistency_ranking(self):
+        """
+        Returns a sorted list of rules by Consistency % (Successes / Total Active Days).
+        """
+        today = self.get_today_ist()
+        rules = self.supabase.table("rules").select("id, name, active_from").execute().data
+        
+        ranking = []
+        for r in rules:
+            # Determine how long this rule has been active
+            # (Simplification: using global start date if active_from is null/old)
+            # For robustness, we check the global anchor or just count logs
+            # Better Metric: Total True Logs / (Today - Global Start Date)
+            
+            global_anchor = self.get_anchor(None) # Assuming global start
+            total_days = (today - global_anchor).days + 1
+            if total_days < 1: total_days = 1
+            
+            # Count Successes
+            res = self.supabase.table("logs").select("id", count="exact")\
+                .eq("rule_id", r['id']).eq("satisfied", True).execute()
+            success_count = res.count
+            
+            consistency = (success_count / total_days) * 100
+            ranking.append({"name": r['name'], "score": consistency})
+            
+        # Sort High to Low
+        return sorted(ranking, key=lambda x: x['score'], reverse=True)
