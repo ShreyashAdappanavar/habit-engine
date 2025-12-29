@@ -146,30 +146,28 @@ class HabitAuditor:
             app_start = self.get_app_start_date()
             today = self.get_today_ist()
             
-            # Days elapsed since the anchor was set
             days_elapsed = (today - global_anchor).days
             
-            # Check for activity today (Bonus Point)
+            # Check for activity today
             today_logs = self.supabase.table("logs").select("id").eq("log_date", today.isoformat()).execute()
-            bonus = 1 if len(today_logs.data) > 0 else 0
+            has_logged_today = len(today_logs.data) > 0
             
-            # --- PHOENIX LOGIC ---
             if global_anchor == app_start:
-                # SCENARIO A: First Ever Run (Day 1 is ALIVE)
-                # Math: Elapsed + Bonus
-                # Day 1 Morning: 0 + 0 = 0
-                # Day 1 Evening: 0 + 1 = 1
+                # SCENARIO A: First Ever Run (Day 1 counts)
+                bonus = 1 if has_logged_today else 0
                 global_streak = days_elapsed + bonus
             else:
-                # SCENARIO B: Post-Failure Reset (Day 1 is DEAD/TOMBSTONE)
-                # The anchor was set on the day of failure. We must exclude that day.
-                # Math: Elapsed - 1 + Bonus (Clamped at 0)
-                
-                # Ex: Reset on Monday (Day 0). 
-                # Tuesday Morning (Day 1): (1 - 1) + 0 = 0. (Correct, you haven't proved yourself yet)
-                # Tuesday Evening (Day 1): (1 - 1) + 1 = 1. (Correct, Tuesday is Day 1)
-                base_days = max(0, days_elapsed - 1)
-                global_streak = base_days + bonus
+                # SCENARIO B: Reset (Day 0 is DEAD)
+                if days_elapsed == 0:
+                    # We are ON the day of failure. 
+                    # Even if you logged stuff, it's a fail day.
+                    global_streak = 0 
+                else:
+                    # We are past the day of failure (Day 1+).
+                    # We subtract the Dead Day (1 day penalty).
+                    # We ONLY add the bonus if you logged on this NEW day.
+                    bonus = 1 if has_logged_today else 0
+                    global_streak = (days_elapsed - 1) + bonus
 
         return global_streak, results
 
