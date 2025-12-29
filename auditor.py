@@ -122,11 +122,10 @@ class HabitAuditor:
         
         results = []
         global_fail = False
-        min_streak = 9999
         
+        # 1. Check all rules
         for rule in rules:
             is_valid, buf_left, r_streak = self.check_rule_compliance(rule)
-            
             results.append({
                 "id": rule['id'],
                 "name": rule['name'],
@@ -134,47 +133,69 @@ class HabitAuditor:
                 "buffer_left": buf_left,
                 "rule_streak": r_streak
             })
-            
             if not is_valid:
-                self.reset_anchor(rule['id'])
+                self.reset_anchor(rule['id']) 
                 global_fail = True
-            
-            if r_streak < min_streak:
-                min_streak = r_streak
 
-        # Global Streak Logic
+        # 2. Global Streak Logic
         if global_fail:
-            self.reset_anchor(None) # Reset Global Anchor
+            self.reset_anchor(None)
             global_streak = 0
         else:
-            # If all rules are valid, Global Streak is determined by the lowest rule streak
-            # OR simply the days since Global Anchor. 
-            # Let's use Days Since Anchor, but respecting the "Day 1 Zero" rule.
             global_anchor = self.get_anchor(None)
+            app_start = self.get_app_start_date()
             today = self.get_today_ist()
             
-            # Check if ANY rule has been logged today. If not, today doesn't count for global yet.
+            # Days elapsed since the anchor was set
+            days_elapsed = (today - global_anchor).days
+            
+            # Check for activity today (Bonus Point)
             today_logs = self.supabase.table("logs").select("id").eq("log_date", today.isoformat()).execute()
-            logged_today_count = len(today_logs.data)
+            bonus = 1 if len(today_logs.data) > 0 else 0
             
-            raw_days = (today - global_anchor).days
-            
-            # Logic: Streak = Past Days + (1 if today is partially logged/active)
-            # Actually, simplify: Global Streak = Minimum Streak among all rules.
-            # This is the most honest metric. You are only as strong as your weakest link.
-            global_streak = min_streak if rules else 0
+            # --- PHOENIX LOGIC ---
+            if global_anchor == app_start:
+                # SCENARIO A: First Ever Run (Day 1 is ALIVE)
+                # Math: Elapsed + Bonus
+                # Day 1 Morning: 0 + 0 = 0
+                # Day 1 Evening: 0 + 1 = 1
+                global_streak = days_elapsed + bonus
+            else:
+                # SCENARIO B: Post-Failure Reset (Day 1 is DEAD/TOMBSTONE)
+                # The anchor was set on the day of failure. We must exclude that day.
+                # Math: Elapsed - 1 + Bonus (Clamped at 0)
+                
+                # Ex: Reset on Monday (Day 0). 
+                # Tuesday Morning (Day 1): (1 - 1) + 0 = 0. (Correct, you haven't proved yourself yet)
+                # Tuesday Evening (Day 1): (1 - 1) + 1 = 1. (Correct, Tuesday is Day 1)
+                base_days = max(0, days_elapsed - 1)
+                global_streak = base_days + bonus
 
         return global_streak, results
+
+    def get_app_start_date(self):
+        """Fetches the immutable start date of the entire system."""
+        try:
+            res = self.supabase.table("global_config").select("value").eq("key", "app_start_date").single().execute()
+            return datetime.date.fromisoformat(res.data['value'])
+        except Exception:
+            # Fallback for safety: treat today as start if DB is missing row
+            return self.get_today_ist()
     
     def calculate_discipline_index(self, n_days):
         """
-        Calculates the Weighted Moving Average using Pandas.
-        Vectorized approach: Faster and handles date gaps automatically.
+        Calculates Weighted Moving Average using an Elastic Window.
+        If app age < n_days, it calculates average over the app age (M-day avg).
         """
         today = self.get_today_ist()
-        start_date = today - datetime.timedelta(days=n_days - 1)
+        app_start = self.get_app_start_date()
         
-        # 1. Fetch Weights
+        # 1. Determine the Elastic Window
+        # The lookback cannot go before the app started.
+        lookback_start = today - datetime.timedelta(days=n_days - 1)
+        effective_start_date = max(lookback_start, app_start)
+        
+        # 2. Fetch Weights
         rules = self.supabase.table("rules").select("id, weight").execute().data
         if not rules: return 0.0
         
@@ -182,35 +203,38 @@ class HabitAuditor:
         total_weight = sum(weights.values())
         if total_weight == 0: return 0.0
 
-        # 2. Fetch Logs
+        # 3. Fetch Logs (Only within the effective window)
         logs = self.supabase.table("logs").select("rule_id, log_date, satisfied")\
-            .gte("log_date", start_date.isoformat())\
+            .gte("log_date", effective_start_date.isoformat())\
             .lte("log_date", today.isoformat())\
             .execute().data
             
-        # 3. Create DataFrame
+        # 4. Create DataFrame
         df = pd.DataFrame(logs)
         
-        # Handle Empty State (No logs in window -> Score is 0)
-        if df.empty:
-            return 0.0
+        # 5. Vectorized Calculation
+        if not df.empty:
+            df['log_date'] = pd.to_datetime(df['log_date']).dt.date
+            df['weight'] = df['rule_id'].map(weights)
+            # Sum satisfied weights per day
+            daily_sums = df[df['satisfied'] == True].groupby('log_date')['weight'].sum()
+        else:
+            daily_sums = pd.Series(dtype=float)
 
-        # 4. Vectorized Calculation
-        df['log_date'] = pd.to_datetime(df['log_date']).dt.date
-        df['weight'] = df['rule_id'].map(weights)
+        # 6. Reindex over the EFFECTIVE range
+        # If today is Day 5 and we want a 30-day index, full_range is just 5 days.
+        # This ensures we don't divide by 30 (which would artificially lower the score).
+        full_range = pd.date_range(start=effective_start_date, end=today).date
         
-        # Filter for True only, then Group by Date
-        daily_sums = df[df['satisfied'] == True].groupby('log_date')['weight'].sum()
-        
-        # 5. Reindex (The Critical Step)
-        # This creates a list of ALL dates in the window. 
-        # If a date is missing in 'daily_sums', pandas fills it with 0.0 automatically.
-        full_range = pd.date_range(start=start_date, end=today).date
+        # Fill missing days with 0.0
         daily_scores = daily_sums.reindex(full_range, fill_value=0.0)
         
-        # 6. Normalize and Average
-        # (Daily Weight Sum / Total Possible Weight) * 100
+        # 7. Normalize
         normalized_scores = (daily_scores / total_weight) * 100
+        
+        # 8. Average
+        # If start date is in the future (edge case), return 0
+        if len(normalized_scores) == 0: return 0.0
         
         return round(normalized_scores.mean(), 1)
     
@@ -269,21 +293,18 @@ class HabitAuditor:
     def get_consistency_ranking(self):
         """
         Returns a sorted list of rules by Consistency % (Successes / Total Active Days).
+        Uses App Start Date to ensure 'All Time' accuracy even after streak resets.
         """
         today = self.get_today_ist()
-        rules = self.supabase.table("rules").select("id, name, active_from").execute().data
+        rules = self.supabase.table("rules").select("id, name").execute().data
+        
+        # FIX: Use Immutable App Start Date, not the mutable Global Anchor
+        app_start = self.get_app_start_date()
+        total_days = (today - app_start).days + 1
+        if total_days < 1: total_days = 1
         
         ranking = []
         for r in rules:
-            # Determine how long this rule has been active
-            # (Simplification: using global start date if active_from is null/old)
-            # For robustness, we check the global anchor or just count logs
-            # Better Metric: Total True Logs / (Today - Global Start Date)
-            
-            global_anchor = self.get_anchor(None) # Assuming global start
-            total_days = (today - global_anchor).days + 1
-            if total_days < 1: total_days = 1
-            
             # Count Successes
             res = self.supabase.table("logs").select("id", count="exact")\
                 .eq("rule_id", r['id']).eq("satisfied", True).execute()

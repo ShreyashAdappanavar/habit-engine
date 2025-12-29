@@ -86,10 +86,11 @@ with tab1:
             is_locked = False
             lock_msg = ""
             
-            if entry_exists and not is_prev_true:
-                is_locked = True
-                lock_msg = "History Locked (Fail cannot become Pass)"
-
+            # FIX: Only apply the lock if we are editing the PAST
+            if target_date < today: # or specifically '== yesterday'
+                if entry_exists and not is_prev_true:
+                    is_locked = True
+                    lock_msg = "History Locked (Fail cannot become Pass)"
 
             desc_text = rule.get('description', '') or ""
             final_help = f"🔒 {lock_msg}\n\n{desc_text}" if is_locked else desc_text
