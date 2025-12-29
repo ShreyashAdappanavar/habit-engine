@@ -6,12 +6,18 @@ from auditor import HabitAuditor
 st.set_page_config(page_title="Discipline Engine", layout="wide")
 
 # --- SECURITY LAYER ---
+# --- SECURITY LAYER ---
 def check_password():
     """Returns `True` if the user had the correct password."""
     def password_entered():
-        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+        # SDE FIX: Use .get() to avoid KeyError if state is flaky
+        entered_pw = st.session_state.get("password", "")
+        
+        if entered_pw == st.secrets["APP_PASSWORD"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # clean up
+            # Only delete if it actually exists
+            if "password" in st.session_state:
+                del st.session_state["password"]  
         else:
             st.session_state["password_correct"] = False
 

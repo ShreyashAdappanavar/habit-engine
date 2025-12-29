@@ -275,7 +275,7 @@ class HabitAuditor:
                     score += weights.get(row['rule_id'], 0)
             return round((score / total_weight) * 100, 1)
 
-        daily_scores = df.groupby('log_date').apply(calculate_day_score).reset_index(name='Daily Score')
+        daily_scores = df.groupby('log_date').apply(calculate_day_score, include_groups=False).reset_index(name='Daily Score')
         
         # 5. Reindex to fill missing dates with 0 (The Passive Fail Logic)
         full_range = pd.date_range(start=start_date, end=today)
