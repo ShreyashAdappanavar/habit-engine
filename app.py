@@ -114,7 +114,9 @@ with tab1:
         if submitted:
             if new_entries:
                 try:
-                    auditor.supabase.table("logs").upsert(new_entries).execute()
+                    auditor.supabase.table("logs").upsert(new_entries, 
+                                                          on_conflict="rule_id, log_date"
+                                                          ).execute()
                     st.success("Protocol Updated.")
                     st.rerun()
                 except Exception as e:
