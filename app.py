@@ -1,237 +1,341 @@
-import streamlit as st
-import datetime
-from auditor import HabitAuditor
+import datetime as dt
+import os
+import time
 
-# --- CONFIGURATION ---
+import streamlit as st
+from supabase import create_client
+
+import engine
+
+
+def sb():
+    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+
+
+def load_active_rules_for_date(sb_client, d: dt.date):
+    rows = (
+        sb_client.table("rule_defs")
+        .select("*")
+        .lte("effective_from", d.isoformat())
+        .order("rule_key", desc=False)
+        .order("effective_from", desc=True)
+        .execute()
+        .data
+    )
+    latest = {}
+    for r in rows:
+        k = r["rule_key"]
+        if k not in latest and r.get("is_active", True):
+            latest[k] = r
+
+    return sorted(latest.values(), key=lambda r: (-float(r.get("weight", 1)), r.get("name", "")))
+
+
+def load_logs_for_date(sb_client, d: dt.date):
+    rows = (
+        sb_client.table("rule_logs")
+        .select("rule_key,state")
+        .eq("log_date", d.isoformat())
+        .execute()
+        .data
+    )
+    return {r["rule_key"]: r["state"] for r in rows}
+
+
+def upsert_logs_for_date(sb_client, d: dt.date, states: dict):
+    payload = []
+    now = dt.datetime.utcnow().isoformat()
+    for rule_key, checked in states.items():
+        payload.append(
+            {
+                "log_date": d.isoformat(),
+                "rule_key": rule_key,
+                "state": "PASS" if checked else "UNKNOWN",
+                "updated_at": now,
+            }
+        )
+    if payload:
+        sb_client.table("rule_logs").upsert(payload, on_conflict="log_date,rule_key").execute()
+
+
+def streak_len_days(start_date: dt.date, processed_through: dt.date) -> int:
+    if processed_through < start_date:
+        return 0
+    return (processed_through - start_date).days + 1
+
+
+def compute_buffer_view(rules, rule_state_json, streak_start: dt.date, processed_through: dt.date):
+    rows = []
+    for r in rules:
+        rule_key = r["rule_key"]
+        name = r["name"]
+        window_days = int(r["window_days"])
+        buffer_misses = int(r["buffer_misses"])
+
+        stt = (rule_state_json or {}).get(rule_key) or {}
+        widx = stt.get("widx")
+        misses = int(stt.get("misses", 0))
+
+        if widx is None:
+            widx = (processed_through - streak_start).days // window_days if processed_through >= streak_start else 0
+
+        remaining_n = buffer_misses - misses
+        remaining_str = f"{remaining_n}/{buffer_misses}"
+
+        window_start = streak_start + dt.timedelta(days=widx * window_days)
+        window_end = window_start + dt.timedelta(days=window_days - 1)
+        resets_in = (window_end - processed_through).days
+        if resets_in < 0:
+            resets_in = 0
+
+        rows.append(
+            {
+                "name": name,
+                "remaining": remaining_str,
+                "remaining_n": remaining_n,
+                "window_days": window_days,
+                "resets_in": resets_in,
+            }
+        )
+
+    return rows
+
+
 st.set_page_config(page_title="Discipline Engine", layout="wide")
 
-# --- SECURITY LAYER ---
-# --- SECURITY LAYER ---
-def check_password():
-    """Returns `True` if the user had the correct password."""
-    def password_entered():
-        # SDE FIX: Use .get() to avoid KeyError if state is flaky
-        entered_pw = st.session_state.get("password", "")
-        
-        if entered_pw == st.secrets["APP_PASSWORD"]:
-            st.session_state["password_correct"] = True
-            # Only delete if it actually exists
-            if "password" in st.session_state:
-                del st.session_state["password"]  
-        else:
-            st.session_state["password_correct"] = False
+st.markdown(
+    """
+<style>
+:root{
+  --bg: rgba(255,255,255,0.03);
+  --br: rgba(255,255,255,0.10);
+  --muted: rgba(255,255,255,0.65);
+  --muted2: rgba(255,255,255,0.50);
+}
+.block-container{ padding-top: 0.7rem; padding-bottom: 0.9rem; max-width: 1180px; }
+h1,h2,h3{ letter-spacing: -0.02em; margin-bottom: 0.2rem; }
 
-    if "password_correct" not in st.session_state:
-        # First run, show input
-        st.text_input(
-            "Enter Access PIN", type="password", on_change=password_entered, key="password"
+.kpi{
+  border: 1px solid var(--br);
+  background: var(--bg);
+  border-radius: 16px;
+  padding: 10px 12px;
+}
+.kpi .label{ color: var(--muted2); font-size: 0.82rem; margin-bottom: 2px; }
+.kpi .value{ font-size: 1.25rem; font-weight: 700; line-height: 1.2; }
+.kpi .sub{ color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+
+.panel{
+  border: 1px solid var(--br);
+  background: var(--bg);
+  border-radius: 16px;
+  padding: 10px 12px;
+}
+
+.smallnote{ color: var(--muted); font-size: 0.85rem; margin-top: 0.15rem; }
+.stButton>button{ border-radius: 12px; padding: 0.45rem 0.65rem; }
+hr{ opacity: 0.18; margin: 0.45rem 0; }
+
+/* compress form widget spacing */
+div[data-testid="stForm"] div[data-testid="stVerticalBlock"]{ gap: 0.0rem !important; }
+div[data-testid="stForm"] [data-testid="stWidget"]{ margin-bottom: -0.70rem !important; }
+div[data-testid="stForm"] [data-testid="stWidget"] > div{ padding-top: 0 !important; padding-bottom: 0 !important; }
+div[data-testid="stToggle"] label{ margin: 0 !important; padding: 0 !important; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+engine.auto_process_until_yesterday()
+
+sb_client = sb()
+today = dt.date.today()
+
+engine.ensure_app_start_date(sb_client)
+open_streak = engine.get_open_streak(sb_client)
+
+s_start = dt.date.fromisoformat(open_streak["start_date"])
+processed_through = dt.date.fromisoformat(open_streak["processed_through_date"])
+today_locked = processed_through >= today
+
+di7 = engine.compute_discipline_index(sb_client, processed_through, 7)
+di30 = engine.compute_discipline_index(sb_client, processed_through, 30)
+di7_pct = round(di7["di"] * 100, 1)
+di30_pct = round(di30["di"] * 100, 1)
+
+
+finalized_len = streak_len_days(s_start, processed_through)
+pending_from = processed_through + dt.timedelta(days=1)
+pending_days = (today - pending_from).days + 1 if pending_from <= today else 0
+
+rules = load_active_rules_for_date(sb_client, today)
+logs = load_logs_for_date(sb_client, today)
+
+st.markdown("# Discipline Engine")
+
+k1, k2, k3, k4 = st.columns([1.1, 1.1, 1.1, 1.7])
+with k1:
+    st.markdown(
+        '<div class="kpi"><div class="label">Streak (finalized)</div>'
+        f'<div class="value">{finalized_len}</div>'
+        f'<div class="sub">Start: {s_start.isoformat()}</div></div>',
+        unsafe_allow_html=True,
+    )
+with k2:
+    st.markdown(
+        '<div class="kpi"><div class="label">Finalized through</div>'
+        f'<div class="value">{processed_through.isoformat()}</div>'
+        f'<div class="sub">Pending: {pending_days} day(s)</div></div>',
+        unsafe_allow_html=True,
+    )
+with k3:
+    st.markdown(
+        '<div class="kpi"><div class="label">Today</div>'
+        f'<div class="value">{today.isoformat()}</div>'
+        f'<div class="sub">{"LOCKED" if today_locked else "EDITABLE"}</div></div>',
+        unsafe_allow_html=True,
+    )
+with k4:
+    total = len(rules)
+    saved_pass = sum(1 for r in rules if logs.get(r["rule_key"], "UNKNOWN") == "PASS")
+    st.markdown(
+        '<div class="kpi"><div class="label">Progress (saved)</div>'
+        f'<div class="value">{saved_pass}/{total}</div>'
+        '<div class="sub">Updates apply only on Save/Finalize.</div></div>',
+        unsafe_allow_html=True,
+    )
+
+st.markdown("")
+
+# Rules section full width, 2-column grid
+st.markdown('<div class="panel">', unsafe_allow_html=True)
+st.markdown("## Today")
+st.markdown('<div class="smallnote">Hover rule label for description. Ordered by weight.</div>', unsafe_allow_html=True)
+
+with st.form("today_form", clear_on_submit=False):
+    ui_states = {}
+
+    for i in range(0, len(rules), 2):
+        cols = st.columns(2, gap="small")
+        pair = rules[i : i + 2]
+        for j, r in enumerate(pair):
+            with cols[j]:
+                rule_key = r["rule_key"]
+                desc = (r.get("description") or "").strip()
+                default_checked = (logs.get(rule_key, "UNKNOWN") == "PASS")
+                ui_states[rule_key] = st.toggle(
+                    r["name"],
+                    value=default_checked,
+                    disabled=today_locked,
+                    help=desc if desc else None,
+                )
+
+    b1, b2, b3 = st.columns([1, 1, 2.2])
+    with b1:
+        save_pressed = st.form_submit_button("Save", disabled=today_locked, use_container_width=True)
+    with b2:
+        finalize_pressed = st.form_submit_button("Finalize", disabled=today_locked, use_container_width=True)
+    with b3:
+        st.markdown(
+            '<div class="smallnote">Finalize locks today and evaluates immediately. Otherwise auto at 00:00 tomorrow.</div>',
+            unsafe_allow_html=True,
         )
-        return False
-    elif not st.session_state["password_correct"]:
-        # Password incorrect, show input again + error
-        st.text_input(
-            "Enter Access PIN", type="password", on_change=password_entered, key="password"
-        )
-        st.error("⛔ Access Denied")
-        return False
-    else:
-        # Password correct
-        return True
 
-if not check_password():
-    st.stop()  # SDE Note: This kills the script execution here. Nothing below runs.
+if save_pressed:
+    upsert_logs_for_date(sb_client, today, ui_states)
+    st.success("Saved.")
+    time.sleep(1.0)
+    st.rerun()
 
-# --- INITIALIZATION ---
-try:
-    auditor = HabitAuditor()
-    today = auditor.get_today_ist()
-    yesterday = today - datetime.timedelta(days=1)
-    sleep_id, groom_id = auditor.get_special_rule_ids()
-except Exception as e:
-    st.error(f"System Error: {e}")
-    st.stop()
+if finalize_pressed:
+    upsert_logs_for_date(sb_client, today, ui_states)
+    engine.finalize_today()
+    st.success("Finalized.")
+    time.sleep(1.0)
+    st.rerun()
 
-# --- SIDEBAR ---
-st.sidebar.header("Temporal Controls")
-date_map = {f"Today ({today})": today, f"Yesterday ({yesterday})": yesterday}
-selection = st.sidebar.radio("Log Target:", list(date_map.keys()))
-target_date = date_map[selection]
+st.markdown("</div>", unsafe_allow_html=True)
 
-# --- DATA FETCHING ---
-# We fetch rules and current logs for the target date to determine UI state
-rules = auditor.supabase.table("rules").select("*").order("id").execute().data
-logs_res = auditor.supabase.table("logs").select("*").eq("log_date", target_date.isoformat()).execute()
-current_logs = {l['rule_id']: l['satisfied'] for l in logs_res.data}
+# Discipline Index section (between Rules and Buffers)
+st.markdown("")
+st.markdown('<div class="panel">', unsafe_allow_html=True)
+st.markdown("## Discipline Index")
+st.markdown(
+    f'<div class="smallnote">Computed on finalized days only (through {processed_through.isoformat()}).</div>',
+    unsafe_allow_html=True,
+)
 
-# --- MAIN UI ---
-st.title("🛡️ Protocol Interface")
-st.markdown(f"**Target Date:** `{target_date}`")
+di7 = engine.compute_discipline_index(sb_client, processed_through, 7)
+di30 = engine.compute_discipline_index(sb_client, processed_through, 30)
 
-tab1, tab2 = st.tabs(["🚀 Dashboard", "📈 Analytics"])
+di7_pct = round(di7["di"] * 100, 1) if di7["days"] > 0 else 0.0
+di30_pct = round(di30["di"] * 100, 1) if di30["days"] > 0 else 0.0
 
-with tab1:
-    # --- FORM SECTION ---
-    with st.form("daily_log_form"):
-        new_entries = []
-        
-        for rule in rules:
-            rule_id = rule['id']
-            rule_name = rule['name']
-            
-            # 1. Determine Permission (Yesterday Logging)
-            can_log_yesterday = rule_id in [sleep_id, groom_id] if sleep_id else False
-            if target_date == yesterday and not can_log_yesterday:
-                st.text(f"🔒 {rule_name} (Same-day only)")
-                continue
+c1, c2 = st.columns(2, gap="small")
+with c1:
+    st.markdown(
+        '<div class="kpi"><div class="label">DI (7-day)</div>'
+        f'<div class="value">{di7_pct}%</div>'
+        f'<div class="sub">Days used: {di7["days"]} • {di7["start_date"].isoformat()} → {di7["end_date"].isoformat()}</div></div>',
+        unsafe_allow_html=True,
+    )
+with c2:
+    st.markdown(
+        '<div class="kpi"><div class="label">DI (30-day)</div>'
+        f'<div class="value">{di30_pct}%</div>'
+        f'<div class="sub">Days used: {di30["days"]} • {di30["start_date"].isoformat()} → {di30["end_date"].isoformat()}</div></div>',
+        unsafe_allow_html=True,
+    )
 
-            # 2. Determine State (Locking History)
-            # If a log exists and is FALSE, it is locked. You cannot change History Fail -> Pass.
-            is_prev_true = current_logs.get(rule_id, False)
-            entry_exists = rule_id in current_logs
-            
-            is_locked = False
-            lock_msg = ""
-            
-            # FIX: Only apply the lock if we are editing the PAST
-            if target_date < today: # or specifically '== yesterday'
-                if entry_exists and not is_prev_true:
-                    is_locked = True
-                    lock_msg = "History Locked (Fail cannot become Pass)"
+st.markdown("</div>", unsafe_allow_html=True)
 
-            desc_text = rule.get('description', '') or ""
-            final_help = f"🔒 {lock_msg}\n\n{desc_text}" if is_locked else desc_text
 
-            val = st.checkbox(
-                rule_name, 
-                value=is_prev_true, 
-                disabled=is_locked,
-                key=f"chk_{rule_id}_{target_date}", 
-                help=final_help  # <--- NEW SURGICAL ADDITION
-            )
-            
-            new_entries.append({
-                "rule_id": rule_id, 
-                "log_date": target_date.isoformat(), 
-                "satisfied": val
-            })
+# Buffers section at bottom
+st.markdown("")
+st.markdown('<div class="panel">', unsafe_allow_html=True)
+st.markdown("## Buffers")
+st.markdown(
+    f'<div class="smallnote">As of {processed_through.isoformat()} (pending days excluded).</div>',
+    unsafe_allow_html=True,
+)
+st.markdown("")
 
-        # Submit Button
-        submitted = st.form_submit_button("Synchronize Protocol")
-        if submitted:
-            if new_entries:
-                try:
-                    auditor.supabase.table("logs").upsert(new_entries, 
-                                                          on_conflict="rule_id, log_date"
-                                                          ).execute()
-                    st.success("Protocol Updated.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Sync Failed: {e}")
+buffer_rows = compute_buffer_view(
+    rules=rules,
+    rule_state_json=open_streak.get("rule_state_json") or {},
+    streak_start=s_start,
+    processed_through=processed_through,
+)
 
-    # --- DASHBOARD SECTION ---
-    st.divider()
+h1, h2, h3, h4 = st.columns([2.2, 0.8, 1.0, 1.6])
+with h1:
+    st.caption("Rule")
+with h2:
+    st.caption("Remaining buffer")
+with h3:
+    st.caption("Window length")
+with h4:
+    st.caption("Buffer resets in")
 
-    # Compute Logic
-    global_streak, rule_stats = auditor.get_global_status()
+for row in buffer_rows:
+    c1, c2, c3, c4 = st.columns([2.2, 0.8, 1.0, 1.6])
+    with c1:
+        st.write(row["name"])
 
-    # 1. Global Status Header
-    if global_streak > 0:
-        st.success(f"### 🔥 GLOBAL STREAK: {global_streak} DAYS")
-    else:
-        # If 0, it might be Day 1 or a Reset.
-        st.warning("### ⚠️ GLOBAL STREAK: 0 DAYS")
-
-    # --- DISCIPLINE INDICES ---
-    st.subheader("Discipline Index (Weighted)")
-    col_di1, col_di2, col_di3 = st.columns(3)
-
-    # 7-Day Index
-    di_7 = auditor.calculate_discipline_index(7)
-    col_di1.metric("7-Day Form", f"{di_7}%", help="Weighted average of the last 7 days")
-
-    # 30-Day Index
-    di_30 = auditor.calculate_discipline_index(30)
-    col_di2.metric("30-Day Consistency", f"{di_30}%", help="Weighted average of the last 30 days")
-
-    # Custom Analysis (Collapsed by default)
-    with col_di3.expander("Custom Range"):
-        custom_days = st.number_input("Days", min_value=1, max_value=365, value=90)
-        if st.button("Calculate"):
-            custom_di = auditor.calculate_discipline_index(custom_days)
-            st.write(f"**{custom_days}-Day Index:** {custom_di}%")
-
-    st.divider()
-
-    # 2. Detailed Table
-    st.subheader("Compliance Matrix")
-
-    # Custom Table Layout
-    col_h1, col_h2, col_h3, col_h4 = st.columns([3, 1, 1, 1])
-    col_h1.markdown("**Rule**")
-    col_h2.markdown("**Buffer**")
-    col_h3.markdown("**Streak**")
-    col_h4.markdown("**Status**")
-
-    for stat in rule_stats:
-        c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-        
-        # Name
-        c1.write(stat['name'])
-        
-        # Buffer Calculation for Display
-        # Find original rule to get max buffer
-        orig_rule = next((r for r in rules if r['id'] == stat['id']), None)
-        max_buf = orig_rule['buffer'] if orig_rule else "?"
-        buf_left = stat['buffer_left']
-        
-        # Red text if buffer is empty
-        if buf_left == 0:
-            c2.markdown(f":red[{buf_left} / {max_buf}]")
+    with c2:
+        rn = int(row.get("remaining_n", 0))
+        if rn < 0:
+            st.markdown(f'<span style="color:#ff0000; font-weight:700;">{row["remaining"]}</span>', unsafe_allow_html=True)
+        elif rn == 0:
+            st.markdown(f'<span style="color:#ff8c00; font-weight:700;">{row["remaining"]}</span>', unsafe_allow_html=True)
         else:
-            c2.write(f"{buf_left} / {max_buf}")
-            
-        # Streak
-        c3.write(f"{stat['rule_streak']}")
-        
-        # Status Icon
-        c4.write("✅" if stat['is_valid'] else "❌")
+            st.write(row["remaining"])
 
-with tab2:
-    st.header("Performance Visualizations")
-    
-    # 1. Line Chart
-    st.subheader("Discipline Trend (Last 14 Days)")
-    try:
-        chart_data = auditor.get_trend_data(view_days=14)
-        if not chart_data.empty:
-            # Streamlit Line Chart handles the legend automatically based on columns
-            st.line_chart(chart_data[['Daily Score', '7-Day Avg', '30-Day Avg']], color=["#FF4B4B", "#1f77b4", "#2ca02c"])
-        else:
-            st.info("Not enough data to generate trends.")
-    except Exception as e:
-        st.error(f"Visualization Error: {e}")
+    with c3:
+        st.write(f'{row["window_days"]} days')
 
-    st.divider()
+    with c4:
+        st.write(f'{row["resets_in"]} days')
 
-    # 2. Consistency Ranking
-    st.subheader("Rule Consistency (All Time)")
-    
-    rankings = auditor.get_consistency_ranking()
-    
-    col_best, col_worst = st.columns(2)
-    
-    with col_best:
-        st.markdown("### 🏆 Most Consistent")
-        # Top 3
-        for i, r in enumerate(rankings[:3]):
-            st.write(f"**{i+1}. {r['name']}**")
-            st.progress(r['score'] / 100)
-            st.caption(f"{r['score']:.1f}% Compliance")
 
-    with col_worst:
-        st.markdown("### ⚠️ Needs Improvement")
-        # Bottom 3 (reversed)
-        for i, r in enumerate(reversed(rankings[-3:])):
-            st.write(f"**{i+1}. {r['name']}**")
-            st.progress(r['score'] / 100)
-            st.caption(f"{r['score']:.1f}% Compliance")
+st.markdown("</div>", unsafe_allow_html=True)

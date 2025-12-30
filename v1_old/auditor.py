@@ -22,13 +22,10 @@ class HabitAuditor:
 
     def get_special_rule_ids(self):
         """Dynamically finds IDs for Sleep and Grooming."""
-        try:
-            rules = self.supabase.table("rules").select("id, name").execute().data
-            sleep_id = next((r['id'] for r in rules if "Sleep" in r['name']), None)
-            groom_id = next((r['id'] for r in rules if "Grooming" in r['name']), None)
-            return sleep_id, groom_id
-        except Exception:
-            return None, None
+        rules = self.supabase.table("rules").select("id, name").execute().data
+        sleep_id = next((r['id'] for r in rules if "Sleep" in r['name']), None)
+        groom_id = next((r['id'] for r in rules if "Grooming" in r['name']), None)
+        return sleep_id, groom_id
 
     def get_anchor(self, rule_id=None):
         """
