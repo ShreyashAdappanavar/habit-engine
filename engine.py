@@ -480,8 +480,7 @@ def compute_di_timeseries(
         )
         d += dt.timedelta(days=1)
 
-    return {"rows": rows, "plot_start": plot_start, "end_date": end_date}
-
+    return {"rows": rows, "plot_start": plot_start, "end_date": end_date}\
 
 # ---------------------- Admin: Rule Management (tomorrow-only, no is_active) ----------------------
 
