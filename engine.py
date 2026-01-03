@@ -2,6 +2,7 @@
 import os
 import datetime as dt
 from typing import Dict, Any, List, Optional, Tuple
+import statistics as stats
 
 from supabase import create_client
 
@@ -480,7 +481,190 @@ def compute_di_timeseries(
         )
         d += dt.timedelta(days=1)
 
-    return {"rows": rows, "plot_start": plot_start, "end_date": end_date}\
+    return {"rows": rows, "plot_start": plot_start, "end_date": end_date}
+
+def compute_statistics(
+    sb,
+    end_date: dt.date,
+    consistency_window_days: int = 30,
+) -> Dict[str, Any]:
+    """
+    Returns:
+      - global streak stats (all streaks; OPEN uses processed_through_date as its current end)
+      - 3 best / 3 worst rule consistency over last `consistency_window_days` finalized days
+      - per-rule pass-run (individual rule streak) stats over full history
+    All computations use finalized horizon = end_date (caller passes processed_through).
+    """
+    _validate_rule_defs_no_overlaps(sb)
+
+    app_start = get_app_start_date(sb)
+    if end_date < app_start:
+        return {
+            "global": {"count": 0, "mean": 0.0, "median": 0.0, "stdev": 0.0, "min": 0, "max": 0},
+            "rule_consistency_window_days": consistency_window_days,
+            "consistency": [],
+            "rule_streaks": [],
+            "range": {"start": app_start, "end": end_date},
+        }
+
+    def _mean(xs): return float(stats.mean(xs)) if xs else 0.0
+    def _median(xs): return float(stats.median(xs)) if xs else 0.0
+    def _stdev(xs): return float(stats.stdev(xs)) if len(xs) >= 2 else 0.0
+
+    # ---------- Global streak stats ----------
+    streak_rows = (
+        sb.table("streaks")
+        .select("start_date,end_date,status,processed_through_date")
+        .order("streak_id", desc=False)
+        .execute()
+        .data
+    )
+
+    lengths: List[int] = []
+    for r in streak_rows:
+        s = _date(r["start_date"])
+        e = _date(r["end_date"]) if r.get("end_date") else _date(r["processed_through_date"])
+        l = (e - s).days + 1 if e >= s else 0
+        lengths.append(l)
+
+    global_stats = {
+        "count": len(lengths),
+        "mean": _mean(lengths),
+        "median": _median(lengths),
+        "stdev": _stdev(lengths),
+        "min": int(min(lengths)) if lengths else 0,
+        "max": int(max(lengths)) if lengths else 0,
+    }
+
+    # ---------- Rule versions ----------
+    rule_rows = (
+        sb.table("rule_defs")
+        .select("rule_key,effective_from,effective_to,name,weight")
+        .lte("effective_from", end_date.isoformat())
+        .order("rule_key", desc=False)
+        .order("effective_from", desc=False)
+        .execute()
+        .data
+    )
+
+    versions: Dict[str, List[Tuple[dt.date, Optional[dt.date], str, float]]] = {}
+    for r in rule_rows:
+        k = r["rule_key"]
+        eff_from = _date(r["effective_from"])
+        eff_to = _date(r["effective_to"]) if r.get("effective_to") else None
+        nm = r.get("name") or k
+        wt = float(r.get("weight") or 1.0)
+        versions.setdefault(k, []).append((eff_from, eff_to, nm, wt))
+
+    # ---------- Logs ----------
+    log_rows = (
+        sb.table("rule_logs")
+        .select("log_date,rule_key,state")
+        .gte("log_date", app_start.isoformat())
+        .lte("log_date", end_date.isoformat())
+        .execute()
+        .data
+    )
+    logs = {(dt.date.fromisoformat(x["log_date"]), x["rule_key"]): x["state"] for x in log_rows}
+
+    # ---------- Middle: per-rule consistency over last N finalized days ----------
+    cons_start = max(app_start, end_date - dt.timedelta(days=consistency_window_days - 1))
+    consistency: List[Dict[str, Any]] = []
+
+    for k, vlist in versions.items():
+        i = 0
+        applicable = 0
+        passed = 0
+        last_name = vlist[-1][2] if vlist else k
+
+        d = cons_start
+        while d <= end_date:
+            while i + 1 < len(vlist) and vlist[i + 1][0] <= d:
+                i += 1
+            eff_from, eff_to, nm, wt = vlist[i]
+            last_name = nm
+
+            if d < eff_from or (eff_to is not None and d > eff_to):
+                d += dt.timedelta(days=1)
+                continue
+
+            applicable += 1
+            if logs.get((d, k), "UNKNOWN") == "PASS":
+                passed += 1
+            d += dt.timedelta(days=1)
+
+        rate = (passed / applicable) if applicable else None
+        consistency.append(
+            {
+                "rule_key": k,
+                "name": last_name,
+                "applicable_days": applicable,
+                "pass_days": passed,
+                "pass_rate": rate,
+            }
+        )
+
+    # ---------- Bottom: per-rule individual streak stats (PASS-runs) over full history ----------
+    rule_streaks: List[Dict[str, Any]] = []
+    for k, vlist in versions.items():
+        i = 0
+        last_name = vlist[-1][2] if vlist else k
+
+        runs: List[int] = []
+        cur = 0
+        applicable_seen = 0
+
+        d = app_start
+        while d <= end_date:
+            while i + 1 < len(vlist) and vlist[i + 1][0] <= d:
+                i += 1
+            eff_from, eff_to, nm, wt = vlist[i]
+            last_name = nm
+
+            if d < eff_from or (eff_to is not None and d > eff_to):
+                d += dt.timedelta(days=1)
+                continue
+
+            applicable_seen += 1
+            is_pass = (logs.get((d, k), "UNKNOWN") == "PASS")
+
+            if is_pass:
+                cur += 1
+            else:
+                if cur > 0:
+                    runs.append(cur)
+                    cur = 0
+
+            d += dt.timedelta(days=1)
+
+        # include ongoing current run as a streak sample
+        if cur > 0:
+            runs.append(cur)
+
+        current_streak = cur if (runs and runs[-1] == cur) else 0
+
+        rule_streaks.append(
+            {
+                "rule_key": k,
+                "name": last_name,
+                "current_streak": current_streak,
+                "streak_count": len(runs),
+                "mean": _mean(runs),
+                "median": _median(runs),
+                "stdev": _stdev(runs),
+                "max": int(max(runs)) if runs else 0,
+                "applicable_days": applicable_seen,
+            }
+        )
+
+    return {
+        "global": global_stats,
+        "rule_consistency_window_days": consistency_window_days,
+        "consistency": consistency,
+        "rule_streaks": rule_streaks,
+        "range": {"start": app_start, "end": end_date},
+    }
+
 
 # ---------------------- Admin: Rule Management (tomorrow-only, no is_active) ----------------------
 

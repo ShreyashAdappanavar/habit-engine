@@ -285,7 +285,7 @@ rules_today = load_active_rules_for_date(sb_client, today)
 logs_today = load_logs_for_date(sb_client, today)
 
 st.title("Discipline Engine")
-tab_dash, tab_trend, tab_admin = st.tabs(["Dashboard", "Trend (DI)", "Admin"])
+tab_dash, tab_trend, tab_stats, tab_admin = st.tabs(["Dashboard", "Trend (DI)", "Stats", "Admin"])
 
 
 with tab_dash:
@@ -488,6 +488,101 @@ with tab_trend:
             st.line_chart(df[["DI1", "DI7", "DI30"]])
 
             st.caption(f"Range: {ts['plot_start'].isoformat()} → {ts['end_date'].isoformat()}")
+
+with tab_stats:
+    st.header("Stats")
+
+    win = st.selectbox(
+        "Consistency window (days)",
+        options=[7, 30],
+        index=1,  # default 30
+    )
+    stats_pack = engine.compute_statistics(sb_client, processed_through, consistency_window_days=win)
+
+    g = stats_pack["global"]
+    st.markdown("## Global streaks")
+    c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
+    with c1:
+        st.markdown(
+            '<div class="kpi"><div class="label">Total streaks</div>'
+            f'<div class="value">{g["count"]}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            '<div class="kpi"><div class="label">Avg length</div>'
+            f'<div class="value">{g["mean"]:.2f}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            '<div class="kpi"><div class="label">Median length</div>'
+            f'<div class="value">{g["median"]:.2f}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            '<div class="kpi"><div class="label">Variability (stdev)</div>'
+            f'<div class="value">{g["stdev"]:.2f}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c5:
+        st.markdown(
+            '<div class="kpi"><div class="label">Min</div>'
+            f'<div class="value">{g["min"]}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c6:
+        st.markdown(
+            '<div class="kpi"><div class="label">Max</div>'
+            f'<div class="value">{g["max"]}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("")
+    st.markdown("## Rule consistency (top 3 / bottom 3)")
+    st.caption(
+        f"Window: last {stats_pack['rule_consistency_window_days']} finalized days "
+        f"(through {processed_through.isoformat()})."
+    )
+
+    cons = pd.DataFrame(stats_pack["consistency"])
+    if cons.empty:
+        st.info("No rules found.")
+    else:
+        cons = cons[cons["pass_rate"].notna()].copy()
+        cons["pass_rate_pct"] = (cons["pass_rate"] * 100.0).round(1)
+
+        cons = cons.sort_values(["pass_rate", "applicable_days"], ascending=[False, False])
+
+        top3 = cons.head(3)[["name", "pass_rate_pct", "pass_days", "applicable_days"]]
+        bot3 = cons.tail(3).sort_values(["pass_rate", "applicable_days"], ascending=[True, False])[
+            ["name", "pass_rate_pct", "pass_days", "applicable_days"]
+        ]
+
+        a, b = st.columns(2, gap="small")
+        with a:
+            st.markdown("### Most consistent")
+            st.dataframe(top3, use_container_width=True, hide_index=True)
+        with b:
+            st.markdown("### Least consistent")
+            st.dataframe(bot3, use_container_width=True, hide_index=True)
+
+    st.markdown("")
+    st.markdown("## Individual rule streaks (PASS runs)")
+    rs = pd.DataFrame(stats_pack["rule_streaks"])
+    if rs.empty:
+        st.info("No rule streak stats.")
+    else:
+        rs = rs.sort_values(["current_streak", "mean"], ascending=[False, False]).copy()
+        rs["mean"] = rs["mean"].round(2)
+        rs["median"] = rs["median"].round(2)
+        rs["stdev"] = rs["stdev"].round(2)
+        st.dataframe(
+            rs[["name", "current_streak", "mean", "median", "stdev", "max", "streak_count", "applicable_days"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
 with tab_admin:
     st.header("Admin")
