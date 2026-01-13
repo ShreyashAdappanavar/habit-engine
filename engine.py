@@ -293,6 +293,28 @@ def finalize_today() -> Dict[str, Any]:
     sb = _sb()
     return process_up_to(sb, _today())
 
+def reset_streak_today() -> Dict[str, Any]:
+    sb = _sb()
+    today = _today()
+    tomorrow = today + dt.timedelta(days=1)
+
+    # Step 1: finalize + evaluate today (same as Finalize button)
+    res = process_up_to(sb, today)
+
+    # Step 2: if streak already ended today (engine opened a new streak starting tomorrow), no-op
+    open_streak = get_open_streak(sb)
+    if not open_streak:
+        return {"reset": False, "reason": "no_open_streak", "events": res.get("events", [])}
+
+    if _date(open_streak["start_date"]) == tomorrow:
+        return {"reset": False, "reason": "already_ended_today", "events": res.get("events", [])}
+
+    # Step 3: otherwise force-close the current open streak today and open the next one tomorrow
+    reason = {"type": "MANUAL_RESET", "date": today.isoformat()}
+    close_streak_and_open_next(sb, open_streak, today, reason)
+    return {"reset": True, "reason": reason, "events": res.get("events", [])}
+
+
 
 def compute_discipline_index(sb, end_date: dt.date, window_days: int) -> Dict[str, Any]:
     """

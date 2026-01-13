@@ -346,13 +346,14 @@ with tab_dash:
                         disabled=today_locked,
                         help=desc if desc else None,
                     )
-
-        b1, b2, b3 = st.columns([1, 1, 2.2])
+        b1, b2, b3, b4 = st.columns([1, 1, 1, 2.2])
         with b1:
             save_pressed = st.form_submit_button("Save", disabled=today_locked, use_container_width=True)
         with b2:
             finalize_pressed = st.form_submit_button("Finalize", disabled=today_locked, use_container_width=True)
         with b3:
+            reset_pressed = st.form_submit_button("Reset Streak", disabled=today_locked, use_container_width=True)
+        with b4:
             st.markdown(
                 '<div class="smallnote">Finalize locks today and evaluates immediately. Otherwise processes on next run after 00:00.</div>',
                 unsafe_allow_html=True,
@@ -370,6 +371,15 @@ with tab_dash:
         ok = upsert_logs_for_date(sb_client, today, ui_states)
         if ok:
             engine.finalize_today()
+        else:
+            st.warning("Today is already finalized (possibly in another tab). Reloading.")
+        time.sleep(0.2)
+        st.rerun()
+
+    if reset_pressed:
+        ok = upsert_logs_for_date(sb_client, today, ui_states)
+        if ok:
+            engine.reset_streak_today()
         else:
             st.warning("Today is already finalized (possibly in another tab). Reloading.")
         time.sleep(0.2)
