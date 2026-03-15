@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MY 25TH YEAR | MASTER CALENDAR</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { box-sizing: border-box; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@200;400;700&family=JetBrains+Mono:wght@300&display=swap');
+        
+        @page {size: landscape; margin: 0; }
+        
+        :root {
+            --bg-color: #f2f2f0;
+            --line-color: #e5e7eb;
+            --text-main: #111111;
+            --text-muted: #9ca3af;
+        }
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            font-family: 'Inter', sans-serif;
+            color: var(--text-main);
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+        }
+
+        body {
+            overflow: auto;
+        }
+
+        .scroll-shell {
+            width: 100%;
+            height: 100vh;
+            overflow: auto;
+            padding: 12px;
+        }
+
+        .page {
+            width: 420mm;          /* fixed virtual canvas */
+            min-height: 297mm;     /* A3 landscape baseline */
+            background-color: var(--bg-color);
+            padding: 10mm;
+            display: flex;
+            flex-direction: column;
+        }
+    
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12mm;
+            padding-top: 5mm;
+            border-top: 5px solid var(--text-main);
+        }
+
+        .title-group h1 {
+            font-size: 5vw;
+            font-weight: 700;
+            letter-spacing: -3px;
+            line-height: 0.8;
+        }
+
+        .window-stats {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 2mm;
+        }
+
+        .bar-wrapper {
+            width: 300px;
+            position: relative;
+        }
+
+        .bar-labels {
+            display: flex;
+            justify-content: space-between;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7vw;
+            color: var(--text-muted);
+            margin-bottom: 1mm;
+        }
+
+        .window-bar-container {
+            width: 100%;
+            height: 24px; /* Thicker to house the text */
+            background: #d4d4d8;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .window-bar-fill {
+            position: absolute;
+            height: 100%;
+            background: var(--text-main);
+            width: 27.27%; 
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .percentage-text {
+            color: var(--bg-color);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7vw;
+            font-weight: 700;
+        }
+
+        .remaining-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8vw;
+            font-weight: 700;
+            margin-top: 2mm;
+        }
+
+        .target-hint {
+            font-size: 0.6vw;
+            color: var(--text-muted);
+            margin-top: 1mm;
+            text-align: right;
+            font-style: italic;
+        }
+                
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(12, minmax(110px, 1fr));
+            gap: 1px;
+            background-color: var(--line-color);
+            border: 1px solid var(--line-color);
+            width: 100%;
+            min-width: 0;
+        }
+
+        .month-column {
+            background-color: white;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .month-header {
+            font-weight: 700;
+            font-size: 28pt;
+            padding: 10mm 5mm;
+            text-align: center;
+            border-bottom: 1px solid var(--line-color);
+            letter-spacing: -1px;
+            border-bottom: 0.75mm solid rgba(0, 0, 0, 0.1);
+        }
+        .month-sub-num {
+            display: block;
+            font-size: 15pt;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 300;
+            color: var(--text-muted);
+            margin-top: 2mm;
+            letter-spacing: 2px;
+        }
+
+        .day-row {
+            height: 24px;
+            display: flex;
+            align-items: center;
+            padding: 0 1.3mm;
+            font-size: 11pt;
+            border-bottom: 1px solid #f3f4f6;
+            position: relative;
+        }
+
+        .alive-mark {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 10px;
+            height: 6px;
+            border-left: 2px solid #44d378;
+            border-bottom: 2px solid #44d378;
+            transform: translate(-50%, -50%) rotate(-45deg);
+            border-radius: 1px;
+        }
+        .break-mark::before,
+        .break-mark::after {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 18%;
+            width: 2px;
+            height: 64%;
+            background: #f84a4a;
+            transform-origin: center;
+            border-radius: 1px;
+        }
+
+        .break-mark::before {
+            transform: translateX(-50%) rotate(32deg);
+        }
+
+        .break-mark::after {
+            transform: translateX(-50%) rotate(-32deg);
+        }
+
+        .checkin-dot {
+            position: absolute;
+            right: 1.8mm;
+            top: 1.8mm;
+            width: 6px;
+            height: 6px;
+            border-radius: 999px;
+        }
+
+        .checkin-dot.filled {
+            background: #111111;
+        }
+
+        .checkin-dot.hollow {
+            border: 1.5px solid #6b7280;
+            background: transparent;
+        }
+
+
+        .day-num {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11pt;    /* Knob: Size */        
+            width: 4mm;        /* Knob: Horizontal slot width */
+            font-weight: 300;   /* Knob: Boldness */
+            text-align: left;   /* Knob: Alignment within the slot */
+        }
+
+        .day-name {
+            font-size: 8pt;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-left: 1.3mm;
+        }
+
+        .status-group {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex-grow: 1;
+            padding: 0 10mm;
+        }
+
+        .year-bar-wrapper {
+            width: 100%;
+            max-width: 500px;
+            position: relative;
+        }
+
+        .year-bar-container {
+            width: 100%;
+            height: 32px;
+            background: #d4d4d8;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid rgba(0,0,0,0.05);
+        }
+
+        /* The vertical tick marks */
+        .tick {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            background: rgba(0, 0, 0, 0.15);
+            z-index: 10;
+        }
+
+        .tick-label {
+            position: absolute;
+            top: -4mm;
+            transform: translateX(-50%);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.5vw;
+            color: var(--text-muted);
+        }
+
+        .year-bar-fill {
+            position: absolute;
+            height: 100%;
+            background: var(--text-main);
+            width: 0%; /* Handled by JS */
+            display: flex;
+            align-items: center;
+            padding-left: 4mm;
+        }
+
+        .year-percentage-text {
+            color: var(--bg-color);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1vw;
+            font-weight: 700;
+        }
+
+        .year-labels {
+            display: flex;
+            justify-content: space-between;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.6vw;
+            color: var(--text-muted);
+            margin-bottom: 1.5mm;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        /* Optional: Subtle divider between months within the same group */
+        .month-column:nth-child(odd) {
+            border-right: 0.15mm solid rgba(0, 0, 0, 0.05); 
+        }
+        /* A thinner, semi-transparent line that doesn't scream for attention */
+        .month-column:nth-child(2n):not(:last-child) {
+            border-right: 0.75mm solid rgba(0, 0, 0, 0.1);
+        }
+        /* Deep Pastel Palette (Slightly Darker/More Saturated) */
+        .group-0 { background-color: #ffe4e1; } /* Misty Rose */
+        .group-1 { background-color: #e0f2fe; } /* Sky Blue */
+        .group-2 { background-color: #fef3c7; } /* Soft Amber */
+        .group-3 { background-color: #dcfce7; } /* Pale Emerald */
+        .group-4 { background-color: #f3e8ff; } /* Soft Lavender */
+        .group-5 { background-color: #e0feff; } /* Pale Cyan */
+
+        /* Weekend: Deeper contrast to match the stronger colors */
+        .weekend { background-color: rgba(0, 0, 0, 0.1) !important; font-weight: 700; }
+
+
+        .empty-day { background-color: #fafafa; }
+    </style>
+</head>
+<body>
+<div class="scroll-shell">
+<div class="page">
+
+<div class="header">
+    <div class="title-group">
+        <h1>MY 25TH YEAR</h1>
+        <p class="font-mono text-[0.8vw] mt-2 text-gray-500 uppercase tracking-widest">
+            Cycle 07 of 22 // 01.03.2026 — 28.02.2027
+        </p>
+    </div>
+    
+    <div class="status-group">
+        <div class="year-bar-wrapper">
+            <div class="year-labels">
+                <span>Cycle 07 Start</span>
+                <span id="days-remaining-label">--- Days Left</span>
+                <span>Cycle 07 End</span>
+            </div>
+            <div class="year-bar-container">
+                <div class="tick" style="left: 25%;"><span class="tick-label">25%</span></div>
+                <div class="tick" style="left: 50%;"><span class="tick-label">50%</span></div>
+                <div class="tick" style="left: 75%;"><span class="tick-label">75%</span></div>
+                
+                <div class="year-bar-fill" id="year-fill">
+                    <span class="year-percentage-text" id="year-percent">0.0%</span>
+                </div>
+            </div>
+            <div class="flex justify-between mt-2 font-mono text-[0.6vw] text-gray-500">
+                <span id="days-elapsed-label">--- Days Passed</span>
+            </div>
+        </div>
+    </div>
+    
+    <div class="window-stats">
+        <div class="bar-wrapper">
+            <div class="bar-labels">
+                <span>18</span>
+                <span>40</span>
+            </div>
+            <div class="window-bar-container">
+                <div class="window-bar-fill">
+                    <span class="percentage-text">27.2%</span>
+                </div>
+            </div>
+            <p class="target-hint text-right text-[0.6vw] text-gray-400 italic mt-1">
+                Goal: Liquid 10^9
+            </p>
+        </div>
+        <div class="remaining-label">
+            <span class="text-gray-400 font-normal uppercase text-[0.6vw] mr-2">Cycles Left:</span> 15
+        </div>
+    </div>
+</div>
+
+<div class="calendar-grid" id="main-grid"></div>
+
+</div>
+</div>
+
+<script>
+    const calendarData = __CALENDAR_DATA__;
+    const dayStateMap = Object.fromEntries(calendarData.days.map(x => [x.date, x]));
+    const months = [
+        { n: "MAR", y: 2026 }, { n: "APR", y: 2026 }, { n: "MAY", y: 2026 }, { n: "JUN", y: 2026 },
+        { n: "JUL", y: 2026 }, { n: "AUG", y: 2026 }, { n: "SEP", y: 2026 }, { n: "OCT", y: 2026 },
+        { n: "NOV", y: 2026 }, { n: "DEC", y: 2026 }, { n: "JAN", y: 2027 }, { n: "FEB", y: 2027 }
+    ];
+
+    const grid = document.getElementById('main-grid');
+
+    months.forEach((m, i) => {
+        const col = document.createElement('div');
+        const groupIdx = Math.floor(i / 2);
+        col.className = `month-column group-${groupIdx}`;
+
+        // Header
+        const head = document.createElement('div');
+        head.className = 'month-header';
+        head.innerText = m.n;
+        col.appendChild(head);
+
+        // Calculate month number (1-12) based on the adjusted March start
+        const monthNum = ((i + 2) % 12 + 1).toString().padStart(2, '0');
+
+        head.innerHTML = `
+            ${m.n}
+            <span class="month-sub-num">${monthNum}</span>
+        `;
+        col.appendChild(head);
+
+        // Calculate days
+        const monthIndex = (i + 2) % 12; // Adjusted for March start
+        const daysInMonth = new Date(m.y, monthIndex + 1, 0).getDate();
+
+        for (let d = 1; d <= 31; d++) {
+            const row = document.createElement('div');
+            row.className = 'day-row';
+            
+            if (d <= daysInMonth) {
+                const dateObj = new Date(m.y, monthIndex, d);
+                const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+                const isWeekend = (dateObj.getDay() === 0 || dateObj.getDay() === 6);
+
+                const isoDate =
+                    `${m.y}-${String(monthIndex + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+                row.dataset.date = isoDate;
+
+                if (isWeekend) row.classList.add('weekend');
+
+                row.innerHTML = `
+                    <span class="day-num">${d.toString().padStart(2, '0')}</span>
+                    <span class="day-name">${dayName}</span>
+                `;
+
+                const state = dayStateMap[isoDate];
+                if (state) {
+                    if (state.streak_state === "break") {
+                        row.classList.add("break-mark");
+                    } else if (state.streak_state === "alive") {
+                        const mark = document.createElement("span");
+                        mark.className = "alive-mark";
+                        row.appendChild(mark);
+                    }
+
+                    if (state.checkin_state === "checked_in") {
+                        const dot = document.createElement("span");
+                        dot.className = "checkin-dot filled";
+                        row.appendChild(dot);
+                    } else if (state.checkin_state === "not_checked_in") {
+                        const dot = document.createElement("span");
+                        dot.className = "checkin-dot hollow";
+                        row.appendChild(dot);
+                    }
+                }
+            } else {
+                row.classList.add('empty-day');
+            }
+            col.appendChild(row);
+        }
+        grid.appendChild(col);
+    });
+    // Updated Year Progress Logic
+    const yearStart = new Date(2026, 2, 1);
+    const yearEnd = new Date(2027, 1, 28);
+    const todayDate = new Date();
+
+    const totalYearMs = yearEnd - yearStart;
+    const elapsedYearMs = todayDate - yearStart;
+
+    const yearPercent = Math.min(Math.max((elapsedYearMs / totalYearMs) * 100, 0), 100).toFixed(1);
+    const daysPassed = Math.floor(elapsedYearMs / (1000 * 60 * 60 * 24));
+    const daysLeft = Math.max(Math.ceil((yearEnd - todayDate) / (1000 * 60 * 60 * 24)), 0);
+
+    document.getElementById('year-fill').style.width = yearPercent + '%';
+    document.getElementById('year-percent').innerText = yearPercent + '%';
+    document.getElementById('days-elapsed-label').innerText = daysPassed + ' DAYS PASSED';
+    document.getElementById('days-remaining-label').innerText = daysLeft + ' DAYS REMAINING';
+</script>
+
+</body>
+</html>

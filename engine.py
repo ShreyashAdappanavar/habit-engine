@@ -758,6 +758,84 @@ def compute_statistics(
         "range": {"start": app_start, "end": end_date},
     }
 
+def build_calendar_payload(
+    sb,
+    cycle_start: dt.date,
+    cycle_end: dt.date,
+) -> Dict[str, Any]:
+    checkin_tracking_start = get_checkin_tracking_start_date(sb)
+    today = _today()
+
+    # Base map
+    day_map: Dict[dt.date, Dict[str, Any]] = {}
+    d = cycle_start
+    while d <= cycle_end:
+        day_map[d] = {
+            "date": d.isoformat(),
+            "streak_state": "neutral",          # neutral | alive | break
+            "checkin_state": "future",          # future | not_tracked | checked_in | not_checked_in
+        }
+        d += dt.timedelta(days=1)
+
+    # -------- streak layer --------
+    streak_rows = (
+        sb.table("streaks")
+        .select("start_date,end_date,status,processed_through_date")
+        .order("streak_id", desc=False)
+        .execute()
+        .data
+    )
+
+    for r in streak_rows:
+        s = _date(r["start_date"])
+        effective_end = _date(r["end_date"]) if r.get("end_date") else _date(r["processed_through_date"])
+
+        alive_start = max(s, cycle_start)
+        alive_end = min(effective_end, cycle_end)
+
+        if alive_start <= alive_end:
+            d = alive_start
+            while d <= alive_end:
+                if d in day_map:
+                    day_map[d]["streak_state"] = "alive"
+                d += dt.timedelta(days=1)
+
+        # break day only for closed streaks
+        if r.get("end_date"):
+            break_day = _date(r["end_date"])
+            if cycle_start <= break_day <= cycle_end:
+                day_map[break_day]["streak_state"] = "break"
+
+    # -------- check-in layer --------
+    checkin_rows = (
+        sb.table("daily_checkins")
+        .select("log_date")
+        .gte("log_date", max(cycle_start, checkin_tracking_start).isoformat())
+        .lte("log_date", cycle_end.isoformat())
+        .execute()
+        .data
+    )
+    checked_in_dates = {_date(r["log_date"]) for r in checkin_rows}
+
+    d = cycle_start
+    while d <= cycle_end:
+        if d > today:
+            day_map[d]["checkin_state"] = "future"
+        elif d < checkin_tracking_start:
+            day_map[d]["checkin_state"] = "not_tracked"
+        elif d in checked_in_dates:
+            day_map[d]["checkin_state"] = "checked_in"
+        else:
+            day_map[d]["checkin_state"] = "not_checked_in"
+        d += dt.timedelta(days=1)
+
+    return {
+        "cycle_start": cycle_start.isoformat(),
+        "cycle_end": cycle_end.isoformat(),
+        "today": today.isoformat(),
+        "checkin_tracking_start": checkin_tracking_start.isoformat(),
+        "days": [day_map[d] for d in sorted(day_map.keys())],
+    }
 
 # ---------------------- Admin: Rule Management (tomorrow-only, no is_active) ----------------------
 

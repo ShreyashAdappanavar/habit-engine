@@ -9,6 +9,10 @@ from supabase import create_client
 import engine
 import pandas as pd
 
+import json
+import streamlit.components.v1 as components
+from pathlib import Path
+
 from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -77,6 +81,11 @@ def load_latest_rules_for_date(sb_client, d: dt.date):
             latest[k] = r
     return latest
 
+def render_calendar_tab(calendar_payload: dict):
+    html_path = Path(__file__).with_name("calendar.html")
+    html = html_path.read_text(encoding="utf-8")
+    html = html.replace("__CALENDAR_DATA__", json.dumps(calendar_payload))
+    components.html(html, height=1200, scrolling=True)
 
 def load_active_rules_for_date(sb_client, d: dt.date):
     latest = load_latest_rules_for_date(sb_client, d)
@@ -201,7 +210,7 @@ st.markdown(
   --muted: rgba(255,255,255,0.65);
   --muted2: rgba(255,255,255,0.50);
 }
-.block-container{ padding-top: 0.7rem; padding-bottom: 0.9rem; max-width: 1180px; }
+.block-container{ padding-top: 0.7rem; padding-bottom: 0.9rem; max-width: 100% !important; }
 h1,h2,h3{ letter-spacing: -0.02em; margin-bottom: 0.2rem; }
 .kpi{
   border: 1px solid var(--br);
@@ -287,6 +296,9 @@ pending_days = (today - pending_from).days + 1 if pending_from <= today else 0
 
 rules_today = load_active_rules_for_date(sb_client, today)
 logs_today = load_logs_for_date(sb_client, today)
+cycle_start = dt.date(2026, 3, 1)
+cycle_end = dt.date(2027, 2, 28)
+calendar_payload = engine.build_calendar_payload(sb_client, cycle_start, cycle_end)
 
 st.title("Discipline Engine")
 
@@ -299,7 +311,7 @@ if not checked_in_today:
         st.rerun()
     st.stop()
 
-tab_dash, tab_trend, tab_stats, tab_admin = st.tabs(["Dashboard", "Trend (DI)", "Stats", "Admin"])
+tab_dash, tab_calendar, tab_trend, tab_stats, tab_admin = st.tabs(["Dashboard", "Calendar", "Trend (DI)", "Stats", "Admin"])
 
 
 with tab_dash:
@@ -488,6 +500,10 @@ with tab_dash:
             st.write(f'{row["resets_in"]} days')
 
     st.markdown("</div>", unsafe_allow_html=True)
+
+with tab_calendar:
+    st.header("Calendar")
+    render_calendar_tab(calendar_payload)
 
 with tab_trend:
     st.header("Trend (DI)")
