@@ -4,3 +4,5 @@ __pycache__/
 .streamlit/
 tests/*
 .streamlit/secrets.toml
+.csv
+14th_march_Data_Dump/
