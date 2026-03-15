@@ -47,13 +47,84 @@ def ensure_app_start_date(sb) -> dt.date:
     if row:
         return _date(row[0]["start_date"])
     start = _today()
-    sb.table("app_meta").insert({"id": 1, "start_date": start.isoformat()}).execute()
+    sb.table("app_meta").insert(
+        {
+            "id": 1,
+            "start_date": start.isoformat(),
+            "checkin_tracking_start_date": start.isoformat(),
+        }
+    ).execute()
     return start
 
 
 def get_app_start_date(sb) -> dt.date:
     return ensure_app_start_date(sb)
 
+def ensure_checkin_tracking_start_date(sb) -> dt.date:
+    ensure_app_start_date(sb)
+    row = (
+        sb.table("app_meta")
+        .select("checkin_tracking_start_date")
+        .eq("id", 1)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if row and row[0].get("checkin_tracking_start_date"):
+        return _date(row[0]["checkin_tracking_start_date"])
+
+    start = _today()
+    sb.table("app_meta").update(
+        {"checkin_tracking_start_date": start.isoformat()}
+    ).eq("id", 1).execute()
+    return start
+
+
+def get_checkin_tracking_start_date(sb) -> dt.date:
+    return ensure_checkin_tracking_start_date(sb)
+
+
+def has_checked_in_on(sb, d: dt.date) -> bool:
+    rows = (
+        sb.table("daily_checkins")
+        .select("log_date")
+        .eq("log_date", d.isoformat())
+        .limit(1)
+        .execute()
+        .data
+    )
+    return bool(rows)
+
+
+def check_in_today(sb) -> dict:
+    today = _today()
+    now = dt.datetime.utcnow().isoformat()
+
+    existing = (
+        sb.table("daily_checkins")
+        .select("*")
+        .eq("log_date", today.isoformat())
+        .limit(1)
+        .execute()
+        .data
+    )
+    if existing:
+        return existing[0]
+
+    row = (
+        sb.table("daily_checkins")
+        .insert(
+            {
+                "log_date": today.isoformat(),
+                "first_checked_in_at": now,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    return row
 
 def get_open_streak(sb) -> Optional[dict]:
     data = (
