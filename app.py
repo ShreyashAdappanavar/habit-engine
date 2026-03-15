@@ -165,6 +165,8 @@ def compute_buffer_view(rules, rule_state_json, streak_start: dt.date, processed
 
     return rows
 
+def _checked_in_today(sb_client, today: dt.date) -> bool:
+    return engine.has_checked_in_on(sb_client, today)
 
 def _admin_gate():
     if "mgr_ok" not in st.session_state:
@@ -264,6 +266,8 @@ tomorrow = _tomorrow()
 
 engine.ensure_app_start_date(sb_client)
 open_streak = engine.get_open_streak(sb_client)
+checkin_tracking_start = engine.get_checkin_tracking_start_date(sb_client)
+checked_in_today = _checked_in_today(sb_client, today)
 
 s_start = _date(open_streak["start_date"])
 processed_through = _date(open_streak["processed_through_date"])
@@ -285,11 +289,22 @@ rules_today = load_active_rules_for_date(sb_client, today)
 logs_today = load_logs_for_date(sb_client, today)
 
 st.title("Discipline Engine")
+
+if not checked_in_today:
+    st.markdown("## Check in")
+    st.info(f"Today: {today.isoformat()} • Full UI is locked until you check in.")
+    if st.button("Check in", use_container_width=True, type="primary"):
+        engine.check_in_today(sb_client)
+        time.sleep(0.2)
+        st.rerun()
+    st.stop()
+
 tab_dash, tab_trend, tab_stats, tab_admin = st.tabs(["Dashboard", "Trend (DI)", "Stats", "Admin"])
 
 
 with tab_dash:
     st.header("Dashboard")
+    st.caption(f"Checked in for today. Check-in tracking started on {checkin_tracking_start.isoformat()}.")
 
     k1, k2, k3, k4 = st.columns([1.1, 1.1, 1.1, 1.7])
     with k1:
