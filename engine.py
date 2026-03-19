@@ -28,15 +28,29 @@ def _sb():
         raise RuntimeError("Missing SUPABASE_URL / SUPABASE_KEY in secrets or env.")
     return create_client(url, key)
 
+_sb_client = _sb()
 
+row = (
+    _sb_client.table("app_meta")
+    .select("day_cutoff_time")
+    .eq("id", 1)
+    .limit(1)
+    .execute()
+    .data
+)
+
+raw = row[0].get("day_cutoff_time") if row else None
+if raw:
+    t = dt.time.fromisoformat(str(raw))
+    DAY_CUTOFF_DELTA = dt.timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
+else:
+    DAY_CUTOFF_DELTA = dt.timedelta(0)
 
 def _today() -> dt.date:
-    return dt.datetime.now(IST).date()
-
+    return (dt.datetime.now(IST) - DAY_CUTOFF_DELTA).date()
 
 def _tomorrow() -> dt.date:
     return _today() + dt.timedelta(days=1)
-
 
 def _date(s: str) -> dt.date:
     return dt.date.fromisoformat(s)
@@ -52,6 +66,7 @@ def ensure_app_start_date(sb) -> dt.date:
             "id": 1,
             "start_date": start.isoformat(),
             "checkin_tracking_start_date": start.isoformat(),
+            "day_cutoff_time": "04:30:00",
         }
     ).execute()
     return start

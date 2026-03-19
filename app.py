@@ -40,12 +40,10 @@ RULE_MGR_PASSWORD = _get_secret("RULE_MGR_PASSWORD")
 
 
 def _today() -> dt.date:
-    return dt.datetime.now(IST).date()
-
+    return (dt.datetime.now(IST) - DAY_CUTOFF_DELTA).date()
 
 def _tomorrow() -> dt.date:
     return _today() + dt.timedelta(days=1)
-
 
 def _date(s: str) -> dt.date:
     return dt.date.fromisoformat(s)
@@ -270,6 +268,23 @@ except ValueError as e:
 
 
 sb_client = sb()
+
+row = (
+    sb_client.table("app_meta")
+    .select("day_cutoff_time")
+    .eq("id", 1)
+    .limit(1)
+    .execute()
+    .data
+)
+
+raw = row[0].get("day_cutoff_time") if row else None
+if raw:
+    t = dt.time.fromisoformat(str(raw))
+    DAY_CUTOFF_DELTA = dt.timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
+else:
+    DAY_CUTOFF_DELTA = dt.timedelta(0)
+
 today = _today()
 tomorrow = _tomorrow()
 
