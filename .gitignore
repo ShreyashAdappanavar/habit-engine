@@ -6,3 +6,6 @@ tests/*
 .streamlit/secrets.toml
 .csv
 14th_march_Data_Dump/
+*.json
+backup.py
+v2_old/
