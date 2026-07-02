@@ -211,6 +211,11 @@ def _load_applicable_rule_rows_for_date(sb, d: dt.date) -> Dict[str, dict]:
             picked[k] = r
     return picked
 
+def _min_buffer_misses_for_date(sb, d: dt.date) -> int:
+    rules = _load_applicable_rule_rows_for_date(sb, d)
+    if not rules:
+        return 0
+    return min(int(r["buffer_misses"]) for r in rules.values())
 
 def _get_log_state(sb, d: dt.date, rule_key: str) -> str:
     row = (
@@ -809,10 +814,12 @@ def build_calendar_payload(
         alive_end = min(effective_end, cycle_end)
 
         if alive_start <= alive_end:
+            floor_days = _min_buffer_misses_for_date(sb, s)
+            floor_end = s + dt.timedelta(days=floor_days - 1) if floor_days > 0 else s - dt.timedelta(days=1)
             d = alive_start
             while d <= alive_end:
                 if d in day_map:
-                    day_map[d]["streak_state"] = "alive"
+                    day_map[d]["streak_state"] = "alive_floor" if d <= floor_end else "alive"
                 d += dt.timedelta(days=1)
 
         # break day only for closed streaks
@@ -894,6 +901,18 @@ def _has_any_version_from_date(sb, rule_key: str, d: dt.date) -> bool:
     )
     return bool(rows)
 
+def _validate_rule_params(window_days: int, buffer_misses: int, weight: float) -> None:
+    if window_days < 1:
+        raise ValueError("window_days must be >= 1")
+    if buffer_misses < 0:
+        raise ValueError("buffer_misses must be >= 0")
+    if buffer_misses >= window_days:
+        raise ValueError(
+            f"buffer_misses ({buffer_misses}) must be less than window_days ({window_days}); "
+            "otherwise the buffer never depletes before the window resets and the rule can never end the streak."
+        )
+    if weight <= 0:
+        raise ValueError("weight must be > 0")
 
 def admin_list_rule_keys(sb) -> List[str]:
     rows = sb.table("rule_defs").select("rule_key").order("rule_key", desc=False).execute().data
@@ -950,6 +969,7 @@ def admin_add_new_rule(
     weight: float,
 ) -> dict:
     eff = _tomorrow()
+    _validate_rule_params(window_days, buffer_misses, weight)
 
     exists = (
         sb.table("rule_defs")
@@ -989,6 +1009,7 @@ def admin_add_new_version(
 ) -> dict:
     today = _today()
     eff_new = _tomorrow()
+    _validate_rule_params(window_days, buffer_misses, weight)
 
     any_row = (
         sb.table("rule_defs").select("rule_key").eq("rule_key", rule_key).limit(1).execute().data

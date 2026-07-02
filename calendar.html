@@ -181,6 +181,16 @@
             transform: translate(-50%, -50%) rotate(-45deg);
             border-radius: 1px;
         }
+        .floor-mark {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 8px;
+            height: 2px;
+            background: #b0b0b0;
+            transform: translate(-50%, -50%);
+            border-radius: 1px;
+        }
         .break-mark::before,
         .break-mark::after {
             content: "";
@@ -453,6 +463,10 @@
                     } else if (state.streak_state === "alive") {
                         const mark = document.createElement("span");
                         mark.className = "alive-mark";
+                        row.appendChild(mark);
+                    } else if (state.streak_state === "alive_floor") {
+                        const mark = document.createElement("span");
+                        mark.className = "floor-mark";
                         row.appendChild(mark);
                     }
 
