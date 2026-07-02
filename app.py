@@ -393,8 +393,8 @@ with tab_dash:
             save_pressed = st.form_submit_button("Save", disabled=today_locked, use_container_width=True)
         with b2:
             finalize_pressed = st.form_submit_button("Finalize", disabled=today_locked, use_container_width=True)
-        with b3:
-            reset_pressed = st.form_submit_button("Reset Streak", disabled=today_locked, use_container_width=True)
+        # with b3:
+        #     reset_pressed = st.form_submit_button("Reset Streak", disabled=today_locked, use_container_width=True)
         with b4:
             st.markdown(
                 '<div class="smallnote">Finalize locks today and evaluates immediately. Otherwise processes on next run after 00:00.</div>',
@@ -418,14 +418,14 @@ with tab_dash:
         time.sleep(0.2)
         st.rerun()
 
-    if reset_pressed:
-        ok = upsert_logs_for_date(sb_client, today, ui_states)
-        if ok:
-            engine.reset_streak_today()
-        else:
-            st.warning("Today is already finalized (possibly in another tab). Reloading.")
-        time.sleep(0.2)
-        st.rerun()
+    # if reset_pressed:
+    #     ok = upsert_logs_for_date(sb_client, today, ui_states)
+    #     if ok:
+    #         engine.reset_streak_today()
+    #     else:
+    #         st.warning("Today is already finalized (possibly in another tab). Reloading.")
+    #     time.sleep(0.2)
+    #     st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
