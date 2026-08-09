@@ -233,28 +233,7 @@ div[data-testid="stForm"] [data-testid="stWidget"]{ margin-bottom: -0.70rem !imp
 div[data-testid="stForm"] [data-testid="stWidget"] > div{ padding-top: 0 !important; padding-bottom: 0 !important; }
 div[data-testid="stToggle"] label{ margin: 0 !important; padding: 0 !important; }
 
-/* ---- FIX: Streamlit tabs labels invisible/collapsed ---- */
-div[data-testid="stTabs"] [data-baseweb="tab-list"]{
-  gap: 0.35rem !important;
-  padding-bottom: 0.25rem !important;
-}
 
-div[data-testid="stTabs"] [data-baseweb="tab"]{
-  padding: 0.45rem 0.85rem !important;
-  min-height: 2.2rem !important;
-}
-
-div[data-testid="stTabs"] [data-baseweb="tab"] p,
-div[data-testid="stTabs"] [data-baseweb="tab"] span{
-  font-size: 0.95rem !important;
-  line-height: 1.2 !important;
-  color: inherit !important;
-  opacity: 1 !important;
-  display: block !important;
-}
-div[data-testid="stTabs"]{
-  min-height: 3rem !important;
-}
 </style>
 """,
     unsafe_allow_html=True,
@@ -297,23 +276,12 @@ s_start = _date(open_streak["start_date"])
 processed_through = _date(open_streak["processed_through_date"])
 today_locked = processed_through >= today
 
-try:
-    di7 = engine.compute_discipline_index(sb_client, processed_through, 7)
-    di30 = engine.compute_discipline_index(sb_client, processed_through, 30)
-except ValueError as e:
-    st.error(f"Rule configuration error (overlapping effective ranges): {e}")
-    st.stop()
-
-
 finalized_len = streak_len_days(s_start, processed_through)
 pending_from = processed_through + dt.timedelta(days=1)
 pending_days = (today - pending_from).days + 1 if pending_from <= today else 0
 
 rules_today = load_active_rules_for_date(sb_client, today)
 logs_today = load_logs_for_date(sb_client, today)
-cycle_start = dt.date(2026, 3, 1)
-cycle_end = dt.date(2027, 2, 28)
-calendar_payload = engine.build_calendar_payload(sb_client, cycle_start, cycle_end)
 
 st.title("Discipline Engine")
 
@@ -326,10 +294,21 @@ if not checked_in_today:
         st.rerun()
     st.stop()
 
-tab_dash, tab_calendar, tab_trend, tab_stats, tab_admin = st.tabs(["Dashboard", "Calendar", "Trend (DI)", "Stats", "Admin"])
+view = st.sidebar.radio(
+    "View",
+    ["Dashboard", "Calendar", "Trend (DI)", "Stats", "Admin"],
+    label_visibility="collapsed",
+)
 
 
-with tab_dash:
+if view == "Dashboard":
+    try:
+        di7 = engine.compute_discipline_index(sb_client, processed_through, 7)
+        di30 = engine.compute_discipline_index(sb_client, processed_through, 30)
+    except ValueError as e:
+        st.error(f"Rule configuration error (overlapping effective ranges): {e}")
+        st.stop()
+
     st.header("Dashboard")
     st.caption(f"Checked in for today. Check-in tracking started on {checkin_tracking_start.isoformat()}.")
 
@@ -517,11 +496,14 @@ with tab_dash:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-with tab_calendar:
+elif view == "Calendar":
     st.header("Calendar")
+    cycle_start = dt.date(2026, 3, 1)
+    cycle_end = dt.date(2027, 2, 28)
+    calendar_payload = engine.build_calendar_payload(sb_client, cycle_start, cycle_end)
     render_calendar_tab(calendar_payload)
 
-with tab_trend:
+elif view == "Trend (DI)":
     st.header("Trend (DI)")
     st.markdown("## Trend (last 14 finalized days)")
     st.caption(f"Computed through finalized day {processed_through.isoformat()}. Today excluded until finalized.")
@@ -546,7 +528,7 @@ with tab_trend:
 
             st.caption(f"Range: {ts['plot_start'].isoformat()} → {ts['end_date'].isoformat()}")
 
-with tab_stats:
+elif view == "Stats":
     st.header("Stats")
 
     win = st.selectbox(
@@ -641,7 +623,7 @@ with tab_stats:
             hide_index=True,
         )
 
-with tab_admin:
+elif view == "Admin":
     st.header("Admin")
     # Admin: Rule management
     st.markdown("## Admin")
