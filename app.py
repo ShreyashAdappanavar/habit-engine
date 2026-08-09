@@ -54,18 +54,16 @@ def load_rule_defs_cached(_sb, day_key: str):
         .data
     )
 
-"""
-The `_sb` leading underscore is not optional. Streamlit hashes every non-underscore 
-argument to build the cache key. The Supabase client object is unhashable; without 
-the underscore you get UnhashableParamError on the very first call.
+# The `_sb` leading underscore is not optional. Streamlit hashes every non-underscore 
+# argument to build the cache key. The Supabase client object is unhashable; without 
+# the underscore you get UnhashableParamError on the very first call.
 
-`load_app_meta_cached` intentionally has no day_key parameter. day_key is derived
-from today, which is derived from DAY_CUTOFF_DELTA, which comes from app_meta itself.
-Keying this function on day_key would create a circular dependency — you'd need the
-cutoff to compute the key needed to fetch the cutoff. Plain ttl=3600 is correct 
-because app_meta changes essentially never (only when you edit day_cutoff_time
- manually, which you haven't built UI for).
-"""
+# `load_app_meta_cached` intentionally has no day_key parameter. day_key is derived
+# from today, which is derived from DAY_CUTOFF_DELTA, which comes from app_meta itself.
+# Keying this function on day_key would create a circular dependency — you'd need the
+# cutoff to compute the key needed to fetch the cutoff. Plain ttl=3600 is correct 
+# because app_meta changes essentially never (only when you edit day_cutoff_time
+#  manually, which you haven't built UI for).
 
 
 def _get_secret(name: str) -> str:
