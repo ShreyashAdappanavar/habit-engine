@@ -403,10 +403,11 @@ with tab_dash:
 
     if save_pressed:
         ok = upsert_logs_for_date(sb_client, today, ui_states)
-        if not ok:
-            st.warning("Today is finalized (possibly in another tab). Reloading.")
-        time.sleep(0.2)
-        st.rerun()
+        if ok:
+            logs_today = {k: ("PASS" if v else "UNKNOWN") for k, v in ui_states.items()}
+            st.success("Saved.")
+        else:
+            st.warning("Today is finalized (possibly in another tab). Please reload the page.")
 
 
     if finalize_pressed:
