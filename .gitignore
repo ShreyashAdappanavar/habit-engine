@@ -9,3 +9,5 @@ tests/*
 *.json
 backup.py
 v2_old/
+v1_old/
+v3_old/
