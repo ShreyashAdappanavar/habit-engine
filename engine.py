@@ -217,6 +217,36 @@ def _min_buffer_misses_for_date(sb, d: dt.date) -> int:
         return 0
     return min(int(r["buffer_misses"]) for r in rules.values())
 
+def _min_buffer_misses_from_rows(rule_rows: List[dict], d: dt.date) -> int:
+    """
+    Pure in-memory equivalent of _min_buffer_misses_for_date.
+    Takes a pre-fetched list of ALL rule_defs rows (any effective_from),
+    dedupes by rule_key keeping the row with the latest effective_from
+    that still applies on date d, then returns the min buffer_misses.
+
+    This MUST reproduce the dedupe logic of _load_applicable_rule_rows_for_date
+    or historical superseded rows (e.g. check_book's old buffer_misses=0
+    from 2026-01-28) will silently pollute the result.
+
+    Note the if k in latest: continue — this exactly mirrors 
+    _load_applicable_rule_rows_for_date's pick-first-match-per-key behavior
+    on a reverse-sorted list. Do not swap this for setdefault without
+    checking — setdefault after a filter behaves differently if a 
+    row fails _row_applies_on; the explicit two-check form above is
+    the safe one.
+    """
+    latest: Dict[str, dict] = {}
+    for r in sorted(rule_rows, key=lambda x: x["effective_from"], reverse=True):
+        k = r["rule_key"]
+        if k in latest:
+            continue
+        if _row_applies_on(r, d):
+            latest[k] = r
+    if not latest:
+        return 0
+    return min(int(r["buffer_misses"]) for r in latest.values())
+
+
 def _get_log_state(sb, d: dt.date, rule_key: str) -> str:
     row = (
         sb.table("rule_logs")
@@ -782,9 +812,24 @@ def build_calendar_payload(
     sb,
     cycle_start: dt.date,
     cycle_end: dt.date,
+    rule_rows: Optional[List[dict]] = None,
 ) -> Dict[str, Any]:
+    """
+    The rule_rows=None default means if you (or future-you) 
+    call engine.build_calendar_payload(sb, start, end) from
+    anywhere else without passing rule_rows, it still works correctly — just without 
+    the speedup. This is a safety net, not the main path.
+    """
     checkin_tracking_start = get_checkin_tracking_start_date(sb)
     today = _today()
+
+    if rule_rows is None:
+        rule_rows = (
+            sb.table("rule_defs")
+            .select("*")
+            .execute()
+            .data
+        )
 
     # Base map
     day_map: Dict[dt.date, Dict[str, Any]] = {}
@@ -814,7 +859,7 @@ def build_calendar_payload(
         alive_end = min(effective_end, cycle_end)
 
         if alive_start <= alive_end:
-            floor_days = _min_buffer_misses_for_date(sb, s)
+            floor_days = _min_buffer_misses_from_rows(rule_rows, s)
             floor_end = s + dt.timedelta(days=floor_days - 1) if floor_days > 0 else s - dt.timedelta(days=1)
             d = alive_start
             while d <= alive_end:
