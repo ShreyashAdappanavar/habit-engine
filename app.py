@@ -16,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 
-
+@st.cache_resource
 def sb():
     url = _get_secret("SUPABASE_URL")
     key = _get_secret("SUPABASE_KEY")
@@ -24,6 +24,48 @@ def sb():
         raise RuntimeError("Missing SUPABASE_URL / SUPABASE_KEY in secrets or env.")
     return create_client(url, key)
 
+
+# NOTE: st.cache_data is shared across ALL sessions hitting this container —
+# it is not per-user. Safe here because this is a single-user app with RLS
+# disabled. If per-user auth is ever added later, these cache keys MUST
+# include a user identifier or one user's data will leak into another's view.
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_app_meta_cached(_sb):
+    """Read-only fetch of the single app_meta row. Returns None if it
+    doesn't exist yet (only possible on a brand-new, never-run app)."""
+    rows = _sb.table("app_meta").select("*").eq("id", 1).limit(1).execute().data
+    return rows[0] if rows else None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_rule_defs_cached(_sb, day_key: str):
+    """All rule_defs rows, all versions, all rule_keys (including inactive).
+    Cache-keyed on day_key so it self-invalidates at the 04:30 logical-day
+    boundary. Safe to cache for the full day because the admin panel only
+    ever writes rows with effective_from = tomorrow — by construction,
+    rule_defs cannot change for TODAY once today has started."""
+    return (
+        _sb.table("rule_defs")
+        .select("*")
+        .order("rule_key", desc=False)
+        .order("effective_from", desc=False)
+        .execute()
+        .data
+    )
+
+"""
+The `_sb` leading underscore is not optional. Streamlit hashes every non-underscore 
+argument to build the cache key. The Supabase client object is unhashable; without 
+the underscore you get UnhashableParamError on the very first call.
+
+`load_app_meta_cached` intentionally has no day_key parameter. day_key is derived
+from today, which is derived from DAY_CUTOFF_DELTA, which comes from app_meta itself.
+Keying this function on day_key would create a circular dependency — you'd need the
+cutoff to compute the key needed to fetch the cutoff. Plain ttl=3600 is correct 
+because app_meta changes essentially never (only when you edit day_cutoff_time
+ manually, which you haven't built UI for).
+"""
 
 
 def _get_secret(name: str) -> str:
@@ -85,10 +127,15 @@ def render_calendar_tab(calendar_payload: dict):
     html = html.replace("__CALENDAR_DATA__", json.dumps(calendar_payload))
     components.html(html, height=1200, scrolling=True)
 
-def load_active_rules_for_date(sb_client, d: dt.date):
-    latest = load_latest_rules_for_date(sb_client, d)
-    active = list(latest.values())
-    return sorted(active, key=lambda r: (-float(r.get("weight", 1)), r.get("name", "")))
+def load_active_rules_for_date(rule_rows: list, d: dt.date):
+    latest = {}
+    for r in sorted(rule_rows, key=lambda x: x["effective_from"], reverse=True):
+        k = r["rule_key"]
+        if k in latest:
+            continue
+        if _applies_on_row(r, d):
+            latest[k] = r
+    return sorted(latest.values(), key=lambda r: (-float(r.get("weight", 1)), r.get("name", "")))
 
 
 def load_logs_for_date(sb_client, d: dt.date):
@@ -265,9 +312,18 @@ else:
     DAY_CUTOFF_DELTA = dt.timedelta(0)
 
 today = _today()
+day_key = today.isoformat()
 tomorrow = _tomorrow()
 
-engine.ensure_app_start_date(sb_client)
+meta = load_app_meta_cached(sb_client)
+if meta is None:
+    engine.ensure_app_start_date(sb_client)   # performs the one-time insert
+    load_app_meta_cached.clear()              # invalidate so we re-fetch the seeded row
+    meta = load_app_meta_cached(sb_client)
+    if meta is None:
+        st.error("Failed to initialize app_meta. Check Supabase connectivity/permissions.")
+        st.stop()
+
 open_streak = engine.get_open_streak(sb_client)
 checkin_tracking_start = engine.get_checkin_tracking_start_date(sb_client)
 checked_in_today = _checked_in_today(sb_client, today)
@@ -280,7 +336,8 @@ finalized_len = streak_len_days(s_start, processed_through)
 pending_from = processed_through + dt.timedelta(days=1)
 pending_days = (today - pending_from).days + 1 if pending_from <= today else 0
 
-rules_today = load_active_rules_for_date(sb_client, today)
+rule_defs_all = load_rule_defs_cached(sb_client, day_key)
+rules_today = load_active_rules_for_date(rule_defs_all, today)
 logs_today = load_logs_for_date(sb_client, today)
 
 st.title("Discipline Engine")
@@ -303,13 +360,14 @@ view = st.sidebar.radio(
 
 if view == "Dashboard":
     try:
-        di7 = engine.compute_discipline_index(sb_client, processed_through, 7)
-        di30 = engine.compute_discipline_index(sb_client, processed_through, 30)
+        di7 = engine.compute_discipline_index(sb_client, processed_through, 7, rule_rows=rule_defs_all)
+        di30 = engine.compute_discipline_index(sb_client, processed_through, 30, rule_rows=rule_defs_all)
     except ValueError as e:
         st.error(f"Rule configuration error (overlapping effective ranges): {e}")
         st.stop()
 
     st.header("Dashboard")
+
     st.caption(f"Checked in for today. Check-in tracking started on {checkin_tracking_start.isoformat()}.")
 
     k1, k2, k3, k4 = st.columns([1.1, 1.1, 1.1, 1.7])
@@ -458,7 +516,7 @@ if view == "Dashboard":
 
 
     display_date = s_start if processed_through < s_start else processed_through
-    rules_asof_pt = load_active_rules_for_date(sb_client, display_date)
+    rules_asof_pt = load_active_rules_for_date(rule_defs_all, display_date)
 
     buffer_rows = compute_buffer_view(
         rules=rules_asof_pt,
@@ -500,7 +558,7 @@ elif view == "Calendar":
     st.header("Calendar")
     cycle_start = dt.date(2026, 3, 1)
     cycle_end = dt.date(2027, 2, 28)
-    calendar_payload = engine.build_calendar_payload(sb_client, cycle_start, cycle_end)
+    calendar_payload = engine.build_calendar_payload(sb_client, cycle_start, cycle_end, rule_rows=rule_defs_all)
     render_calendar_tab(calendar_payload)
 
 elif view == "Trend (DI)":
@@ -511,7 +569,7 @@ elif view == "Trend (DI)":
     if processed_through < engine.get_app_start_date(sb_client):
         st.info("No finalized days yet.")
     else:
-        ts = engine.compute_di_timeseries(sb_client, processed_through, plot_days=14, windows=(7, 30))
+        ts = engine.compute_di_timeseries(sb_client, processed_through, plot_days=14, windows=(7, 30), rule_rows=rule_defs_all)
         rows = ts["rows"]
 
         if not rows:
@@ -536,7 +594,7 @@ elif view == "Stats":
         options=[7, 30],
         index=1,  # default 30
     )
-    stats_pack = engine.compute_statistics(sb_client, processed_through, consistency_window_days=win)
+    stats_pack = engine.compute_statistics(sb_client, processed_through, consistency_window_days=win, rule_rows=rule_defs_all)
 
     g = stats_pack["global"]
     st.markdown("## Global streaks")
@@ -660,7 +718,7 @@ elif view == "Admin":
                         engine.admin_add_new_rule(
                             sb_client, rk, name, desc, int(wdays), int(buf), float(wt)
                         )
-                        time.sleep(0.2)
+                        load_rule_defs_cached.clear()
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
@@ -697,7 +755,7 @@ elif view == "Admin":
                             engine.admin_add_new_version(
                                 sb_client, rk2, name2, desc2, int(wdays2), int(buf2), float(wt2)
                             )
-                            time.sleep(0.2)
+                            load_rule_defs_cached.clear()
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
@@ -713,7 +771,7 @@ elif view == "Admin":
                     if submit3:
                         try:
                             engine.admin_deactivate_rule_key(sb_client, rk3)
-                            time.sleep(0.2)
+                            load_rule_defs_cached.clear()
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))

@@ -372,16 +372,7 @@ def process_up_to(sb, max_date: dt.date) -> Dict[str, Any]:
 
     return {"events": events, "open_streak": get_open_streak(sb)}
 
-def _validate_rule_defs_no_overlaps(sb) -> None:
-    rows = (
-        sb.table("rule_defs")
-        .select("rule_key,effective_from,effective_to")
-        .order("rule_key", desc=False)
-        .order("effective_from", desc=False)
-        .execute()
-        .data
-    )
-
+def _validate_rule_defs_no_overlaps_rows(rows: List[dict]) -> None:
     by_key: Dict[str, List[Tuple[dt.date, Optional[dt.date]]]] = {}
     for r in rows:
         k = r["rule_key"]
@@ -396,13 +387,24 @@ def _validate_rule_defs_no_overlaps(sb) -> None:
         prev_end = prev_b or dt.date.max
         for a, b in spans[1:]:
             end = b or dt.date.max
-            # inclusive overlap check: overlap exists unless prev_end < a
             if prev_end >= a:
                 raise ValueError(
                     f"Overlapping versions for {k}: [{prev_a}..{prev_b or 'NULL'}] overlaps [{a}..{b or 'NULL'}]"
                 )
             prev_a, prev_b, prev_end = a, b, end
 
+
+def _validate_rule_defs_no_overlaps(sb, rule_rows: Optional[List[dict]] = None) -> None:
+    if rule_rows is None:
+        rule_rows = (
+            sb.table("rule_defs")
+            .select("rule_key,effective_from,effective_to")
+            .order("rule_key", desc=False)
+            .order("effective_from", desc=False)
+            .execute()
+            .data
+        )
+    _validate_rule_defs_no_overlaps_rows(rule_rows)
 
 
 def auto_process_until_yesterday() -> Dict[str, Any]:
@@ -437,29 +439,33 @@ def reset_streak_today() -> Dict[str, Any]:
 
 
 
-def compute_discipline_index(sb, end_date: dt.date, window_days: int) -> Dict[str, Any]:
+def compute_discipline_index(sb, end_date: dt.date, window_days: int, rule_rows: Optional[List[dict]] = None) -> Dict[str, Any]:
     """
     Rolling average of daily weighted completion over finalized days only.
     Missing/UNKNOWN => 0 contribution.
     Date range: [max(app_start, end_date-window_days+1) .. end_date].
     Uses rule versions applicable on each day via (effective_from, effective_to).
     """
-    _validate_rule_defs_no_overlaps(sb)
+
+    if rule_rows is None:
+        rule_rows = (
+            sb.table("rule_defs")
+            .select("rule_key,effective_from,effective_to,weight")
+            .lte("effective_from", end_date.isoformat())
+            .order("rule_key", desc=False)
+            .order("effective_from", desc=False)
+            .execute()
+            .data
+        )
+    else:
+        rule_rows = [r for r in rule_rows if _date(r["effective_from"]) <= end_date]
+
+    _validate_rule_defs_no_overlaps_rows(rule_rows)
     app_start = get_app_start_date(sb)
     start_date = max(app_start, end_date - dt.timedelta(days=window_days - 1))
     if start_date > end_date:
         return {"di": 0.0, "days": 0, "start_date": start_date, "end_date": end_date}
 
-    # Load all versions that could affect [start_date..end_date]
-    rule_rows = (
-        sb.table("rule_defs")
-        .select("rule_key,effective_from,effective_to,weight")
-        .lte("effective_from", end_date.isoformat())
-        .order("rule_key", desc=False)
-        .order("effective_from", desc=False)
-        .execute()
-        .data
-    )
 
     versions: Dict[str, List[Tuple[dt.date, Optional[dt.date], float]]] = {}
     for r in rule_rows:
@@ -518,6 +524,7 @@ def compute_di_timeseries(
     end_date: dt.date,
     plot_days: int = 14,
     windows: Tuple[int, int] = (7, 30),
+    rule_rows: Optional[List[dict]] = None,
 ) -> Dict[str, Any]:
     """
     Returns last `plot_days` finalized-day points ending at `end_date` (inclusive):
@@ -526,7 +533,20 @@ def compute_di_timeseries(
 
     Pre-app days are excluded (no implicit zeros).
     """
-    _validate_rule_defs_no_overlaps(sb)
+    if rule_rows is None:
+        rule_rows = (
+            sb.table("rule_defs")
+            .select("rule_key,effective_from,effective_to,weight")
+            .lte("effective_from", end_date.isoformat())
+            .order("rule_key", desc=False)
+            .order("effective_from", desc=False)
+            .execute()
+            .data
+        )
+    else:
+        rule_rows = [r for r in rule_rows if _date(r["effective_from"]) <= end_date]
+        
+    _validate_rule_defs_no_overlaps_rows(rule_rows)
 
     app_start = get_app_start_date(sb)
     if end_date < app_start:
@@ -535,17 +555,6 @@ def compute_di_timeseries(
     plot_start = max(app_start, end_date - dt.timedelta(days=plot_days - 1))
     max_w = max(windows)
     internal_start = max(app_start, plot_start - dt.timedelta(days=max_w - 1))
-
-    # Load rule versions that could apply up to end_date
-    rule_rows = (
-        sb.table("rule_defs")
-        .select("rule_key,effective_from,effective_to,weight")
-        .lte("effective_from", end_date.isoformat())
-        .order("rule_key", desc=False)
-        .order("effective_from", desc=False)
-        .execute()
-        .data
-    )
 
     versions: Dict[str, List[Tuple[dt.date, Optional[dt.date], float]]] = {}
     for r in rule_rows:
@@ -630,6 +639,7 @@ def compute_statistics(
     sb,
     end_date: dt.date,
     consistency_window_days: int = 30,
+    rule_rows: Optional[List[dict]] = None,
 ) -> Dict[str, Any]:
     """
     Returns:
@@ -638,9 +648,23 @@ def compute_statistics(
       - per-rule pass-run (individual rule streak) stats over full history
     All computations use finalized horizon = end_date (caller passes processed_through).
     """
-    _validate_rule_defs_no_overlaps(sb)
+    if rule_rows is None:
+        rule_rows = (
+            sb.table("rule_defs")
+            .select("rule_key,effective_from,effective_to,name,weight")
+            .lte("effective_from", end_date.isoformat())
+            .order("rule_key", desc=False)
+            .order("effective_from", desc=False)
+            .execute()
+            .data
+        )
+    else:
+        rule_rows = [r for r in rule_rows if _date(r["effective_from"]) <= end_date]
+
+    _validate_rule_defs_no_overlaps_rows(rule_rows)
 
     app_start = get_app_start_date(sb)
+
     if end_date < app_start:
         return {
             "global": {"count": 0, "mean": 0.0, "median": 0.0, "stdev": 0.0, "min": 0, "max": 0},
@@ -679,16 +703,6 @@ def compute_statistics(
         "max": int(max(lengths)) if lengths else 0,
     }
 
-    # ---------- Rule versions ----------
-    rule_rows = (
-        sb.table("rule_defs")
-        .select("rule_key,effective_from,effective_to,name,weight")
-        .lte("effective_from", end_date.isoformat())
-        .order("rule_key", desc=False)
-        .order("effective_from", desc=False)
-        .execute()
-        .data
-    )
 
     versions: Dict[str, List[Tuple[dt.date, Optional[dt.date], str, float]]] = {}
     for r in rule_rows:
