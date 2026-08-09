@@ -253,8 +253,17 @@ st.markdown(
   --muted: rgba(255,255,255,0.65);
   --muted2: rgba(255,255,255,0.50);
 }
-.block-container{ padding-top: 0.7rem; padding-bottom: 0.9rem; max-width: 100% !important; }
+.block-container{ padding-top: 0.9rem; padding-bottom: 0.9rem; max-width: 100% !important; }
 h1,h2,h3{ letter-spacing: -0.02em; margin-bottom: 0.2rem; }
+
+div[data-testid="stHeader"]{
+  background: transparent;
+  height: 3.5rem;
+  z-index: 999;
+}
+.block-container{
+  padding-top: 4.5rem !important;
+}
 .kpi{
   border: 1px solid var(--br);
   background: var(--bg);
@@ -278,6 +287,76 @@ div[data-testid="stForm"] [data-testid="stWidget"]{ margin-bottom: -0.70rem !imp
 div[data-testid="stForm"] [data-testid="stWidget"] > div{ padding-top: 0 !important; padding-bottom: 0 !important; }
 div[data-testid="stToggle"] label{ margin: 0 !important; padding: 0 !important; }
 
+
+/* ---- Tab-styled horizontal radio (full width, clean active state) ---- */
+
+/* force full width on every ancestor level, since Streamlit's default
+   width behavior on this widget shrinks to content otherwise */
+div[data-testid="stRadio"]{
+  width: 100% !important;
+}
+div[data-testid="stRadio"] > label{
+  display: none !important;   /* hide the "View" field label entirely */
+}
+div[data-testid="stRadio"] div[role="radiogroup"]{
+  display: flex !important;
+  flex-direction: row !important;
+  width: 100% !important;
+  gap: 0 !important;
+  flex-wrap: nowrap;
+  border-bottom: 1px solid var(--br);
+}
+
+/* each option grows equally to fill the row */
+div[data-testid="stRadio"] div[role="radiogroup"] label{
+  flex: 1 1 0 !important;
+  width: auto !important;
+  display: flex !important;
+  justify-content: center;
+  align-items: center;
+  border: none !important;
+  border-radius: 10px 10px 0 0;
+  padding: 0.55rem 0.5rem !important;
+  margin: 0 1px 0 0 !important;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+div[data-testid="stRadio"] div[role="radiogroup"] label:hover{
+  background: rgba(255,255,255,0.06);
+}
+
+/* hide the circular radio dot entirely */
+div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child{
+  display: none !important;
+}
+
+/* kill BaseWeb's own selected-state styling (the grey box) */
+div[data-testid="stRadio"] label div[data-baseweb="radio"] > div{
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+}
+
+/* active tab accent */
+div[data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked){
+  background: rgba(56, 189, 248, 0.16) !important;
+  border-bottom: 2px solid #38bdf8 !important;
+}
+
+div[data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked) p{
+  color: #38bdf8 !important;
+  font-weight: 700 !important;
+}
+
+div[data-testid="stRadio"] p{
+  font-size: 0.9rem !important;
+  margin: 0 !important;
+  text-align: center;
+}
 
 </style>
 """,
@@ -349,12 +428,17 @@ if not checked_in_today:
         st.rerun()
     st.stop()
 
-view = st.sidebar.radio(
+view = st.segmented_control(
     "View",
     ["Dashboard", "Calendar", "Trend (DI)", "Stats", "Admin"],
+    default="Dashboard",
     label_visibility="collapsed",
+    key="main_view_nav",
+    width="stretch",
 )
 
+if view is None:
+    view = "Dashboard"
 
 if view == "Dashboard":
     try:
