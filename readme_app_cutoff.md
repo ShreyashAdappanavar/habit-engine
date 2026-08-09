@@ -23,7 +23,3 @@ $$LogicalDate = (CurrentTime_{IST} - DayCutoffDelta).date()$$
 * **Check-in:** You cannot log or view the dashboard for a new day until the wall-clock passes 04:30 AM.
 * **Finalization:** The engine automatically processes "yesterday" (anything before the current 04:30 AM boundary) upon the first run of the new logical day.
 * **Data Integrity:** All tables (`rule_logs`, `streaks`, `daily_checkins`) use this calculated date as the primary key.
-
----
-
-Would you like me to generate a simple shell script to automate the Streamlit launch?
