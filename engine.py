@@ -308,8 +308,9 @@ def process_up_to(sb, max_date: dt.date) -> Dict[str, Any]:
         applicable_rules = _load_applicable_rule_rows_for_date(sb, next_day)
         rule_state: Dict[str, Any] = open_streak.get("rule_state_json") or {}
 
-        ended = False
         end_reason: Dict[str, Any] = {}
+
+        broken_rules: List[Dict[str, Any]] = []
 
         for rule_key, rdef in applicable_rules.items():
             st = rule_state.get(rule_key) or {}
@@ -319,7 +320,6 @@ def process_up_to(sb, max_date: dt.date) -> Dict[str, Any]:
             buffer_misses = int(rdef["buffer_misses"])
             widx = _calc_window_index(s_start, next_day, window_days)
 
-            # No reset on version change. Reset only when the window index changes.
             if not st:
                 st = {"ver": cur_ver, "widx": widx, "misses": 0}
             else:
@@ -328,33 +328,30 @@ def process_up_to(sb, max_date: dt.date) -> Dict[str, Any]:
                     st["misses"] = 0
                 st["ver"] = cur_ver
 
-
             state = _get_log_state(sb, next_day, rule_key)
             state = _force_miss_if_unknown(sb, next_day, rule_key, state)
 
             if state == "MISS":
                 st["misses"] = int(st.get("misses", 0)) + 1
                 if st["misses"] > buffer_misses:
-                    # FIX (1): persist final-day counters for the failing rule
-                    rule_state[rule_key] = st
-
-                    ended = True
-                    end_reason = {
+                    broken_rules.append({
                         "rule_key": rule_key,
-                        "date": next_day.isoformat(),
                         "misses_in_window": st["misses"],
                         "buffer_misses": buffer_misses,
                         "window_days": window_days,
                         "rule_version": cur_ver,
-                    }
-                    break
+                    })
 
-            rule_state[rule_key] = st  # unchanged
+            rule_state[rule_key] = st  # always persisted — no early exit
 
-        if ended:
+        if broken_rules:
+            end_reason = {
+                "type": "RULE_BREAK",
+                "date": next_day.isoformat(),
+                "broken_rules": broken_rules,
+            }
             events.append({"type": "STREAK_ENDED", "reason": end_reason})
 
-            # FIX (2): persist the final rule_state_json onto the closing streak
             sb.table("streaks").update(
                 {"rule_state_json": rule_state}
             ).eq("streak_id", open_streak["streak_id"]).execute()
