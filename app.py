@@ -241,6 +241,38 @@ def _admin_gate():
 
     return st.session_state["mgr_ok"]
 
+@st.dialog("Confirm Finalize")
+def confirm_finalize_dialog(ui_states):
+    st.write("Finalize will lock today and evaluate the streak. This cannot be undone.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Yes, Finalize", type="primary", use_container_width=True):
+            ok = upsert_logs_for_date(sb(), today, ui_states)
+            if ok:
+                engine.finalize_today()
+            else:
+                st.warning("Today is already finalized (possibly in another tab).")
+            st.rerun()
+    with c2:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+
+@st.dialog("Confirm Reset Streak")
+def confirm_reset_dialog(ui_states):
+    st.write("Reset Streak will end your current streak today. This cannot be undone.")
+    typed = st.text_input("Type RESET to confirm")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Confirm Reset", type="primary", use_container_width=True, disabled=(typed != "RESET")):
+            ok = upsert_logs_for_date(sb(), today, ui_states)
+            if ok:
+                engine.reset_streak_today()
+            else:
+                st.warning("Today is already finalized (possibly in another tab).")
+            st.rerun()
+    with c2:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
 
 st.set_page_config(page_title="Discipline Engine", layout="wide")
 
@@ -512,8 +544,8 @@ if view == "Dashboard":
             save_pressed = st.form_submit_button("Save", disabled=today_locked, use_container_width=True)
         with b2:
             finalize_pressed = st.form_submit_button("Finalize", disabled=today_locked, use_container_width=True)
-        # with b3:
-        #     reset_pressed = st.form_submit_button("Reset Streak", disabled=today_locked, use_container_width=True)
+        with b3:
+            reset_pressed = st.form_submit_button("Reset Streak", disabled=today_locked, use_container_width=True)
         with b4:
             st.markdown(
                 '<div class="smallnote">Finalize locks today and evaluates immediately. Otherwise processes on next run after 00:00.</div>',
@@ -530,22 +562,10 @@ if view == "Dashboard":
 
 
     if finalize_pressed:
-        ok = upsert_logs_for_date(sb_client, today, ui_states)
-        if ok:
-            engine.finalize_today()
-        else:
-            st.warning("Today is already finalized (possibly in another tab). Reloading.")
-        time.sleep(0.2)
-        st.rerun()
+        confirm_finalize_dialog(ui_states)
 
-    # if reset_pressed:
-    #     ok = upsert_logs_for_date(sb_client, today, ui_states)
-    #     if ok:
-    #         engine.reset_streak_today()
-    #     else:
-    #         st.warning("Today is already finalized (possibly in another tab). Reloading.")
-    #     time.sleep(0.2)
-    #     st.rerun()
+    if reset_pressed:
+        confirm_reset_dialog(ui_states)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
