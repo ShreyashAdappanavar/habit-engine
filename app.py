@@ -54,6 +54,11 @@ def load_rule_defs_cached(_sb, day_key: str):
         .data
     )
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_survivorship_cached(_sb, end_date_iso: str, rule_rows: list):
+    end_date = _date(end_date_iso)
+    return engine.compute_streak_survivorship(_sb, end_date, rule_rows=rule_rows)
+
 # The `_sb` leading underscore is not optional. Streamlit hashes every non-underscore 
 # argument to build the cache key. The Supabase client object is unhashable; without 
 # the underscore you get UnhashableParamError on the very first call.
@@ -462,7 +467,7 @@ if not checked_in_today:
 
 view = st.segmented_control(
     "View",
-    ["Dashboard", "Calendar", "Trend (DI)", "Stats", "Admin"],
+    ["Dashboard", "Calendar", "Trend (DI)", "Stats", "Rules", "Admin"],
     default="Dashboard",
     label_visibility="collapsed",
     key="main_view_nav",
@@ -697,6 +702,8 @@ elif view == "Stats":
         index=1,  # default 30
     )
     stats_pack = engine.compute_statistics(sb_client, processed_through, consistency_window_days=win, rule_rows=rule_defs_all)
+    closure_pack = engine.compute_closure_breakdown(sb_client, processed_through)
+    surv_pack = compute_survivorship_cached(sb_client, processed_through.isoformat(), rule_defs_all)
 
     g = stats_pack["global"]
     st.markdown("## Global streaks")
@@ -737,6 +744,59 @@ elif view == "Stats":
             f'<div class="value">{g["max"]}</div></div>',
             unsafe_allow_html=True,
         )
+
+    st.markdown("")
+    st.markdown("## Closure Type")
+    st.caption("Splits streak history by how each streak ended — rule failure vs manual reset.")
+
+    ts = closure_pack["type_summary"]
+    if not ts:
+        st.info("No closed streaks yet.")
+    else:
+        cols = st.columns(len(ts))
+        for col, row in zip(cols, ts):
+            with col:
+                st.markdown(
+                    f'<div class="kpi"><div class="label">{row["type"]}</div>'
+                    f'<div class="value">{row["count"]}</div>'
+                    f'<div class="sub">Avg length: {row["avg_length"]} • Range: {row["min_length"]}–{row["max_length"]}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("")
+    rf_col, pf_col = st.columns(2, gap="small")
+    with rf_col:
+        st.markdown("### Rules by break frequency")
+        rf = pd.DataFrame(closure_pack["rule_freq"])
+        if rf.empty:
+            st.info("No rule breaks recorded.")
+        else:
+            st.dataframe(rf, use_container_width=True, hide_index=True)
+    with pf_col:
+        st.markdown("### Rule pairs that broke streaks together")
+        pf = pd.DataFrame(closure_pack["pair_freq"])
+        if pf.empty:
+            st.info("No co-occurring rule breaks recorded.")
+        else:
+            st.dataframe(pf, use_container_width=True, hide_index=True)
+
+    st.markdown("")
+    st.markdown("## Streak Survivorship")
+    st.caption("Per-rule: % of applicable days where the rule's buffer already had at least one miss (\"floor-consumed\") vs fully clean.")
+
+    st.markdown(
+        '<div class="kpi"><div class="label">Overall floor-consumed days</div>'
+        f'<div class="value">{surv_pack["overall_floor_pct"]}%</div>'
+        '<div class="sub">Across all rules, all finalized days</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("")
+    sv = pd.DataFrame(surv_pack["per_rule"])
+    if sv.empty:
+        st.info("No finalized days yet.")
+    else:
+        st.dataframe(sv, use_container_width=True, hide_index=True)
 
     st.markdown("")
     st.markdown("## Rule consistency (top 3 / bottom 3)")
@@ -782,6 +842,26 @@ elif view == "Stats":
             use_container_width=True,
             hide_index=True,
         )
+
+elif view == "Rules":
+    st.header("Rules")
+
+    active_keys = sorted({r["rule_key"] for r in rules_today})
+    picked = st.selectbox("Rule", active_keys)
+
+    dive = engine.compute_rule_deep_dive(sb_client, picked, processed_through, rule_rows=rule_defs_all)
+
+    df = pd.DataFrame(dive["daily"])
+    if df.empty:
+        st.info("No data yet.")
+    else:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
+        st.line_chart(df[["rolling_7d_pct"]])
+
+    st.markdown("### Pass rate by version")
+    vs = pd.DataFrame(dive["version_summary"])
+    st.dataframe(vs, use_container_width=True, hide_index=True)
 
 elif view == "Admin":
     st.header("Admin")

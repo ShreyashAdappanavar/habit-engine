@@ -55,6 +55,28 @@ def _tomorrow() -> dt.date:
 def _date(s: str) -> dt.date:
     return dt.date.fromisoformat(s)
 
+def _fetch_rule_logs_range(sb, start_date: dt.date, end_date: dt.date) -> List[dict]:
+    """Paginated fetch — Supabase/PostgREST caps unbounded selects at 1000
+    rows silently. rule_logs already exceeds that. Always use this instead
+    of a raw .select() for any full-range rule_logs fetch."""
+    rows: List[dict] = []
+    page_size = 1000
+    offset = 0
+    while True:
+        page = (
+            sb.table("rule_logs")
+            .select("log_date,rule_key,state")
+            .gte("log_date", start_date.isoformat())
+            .lte("log_date", end_date.isoformat())
+            .range(offset, offset + page_size - 1)
+            .execute()
+            .data
+        )
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return rows
 
 def ensure_app_start_date(sb) -> dt.date:
     row = sb.table("app_meta").select("start_date").eq("id", 1).execute().data
@@ -434,7 +456,109 @@ def reset_streak_today() -> Dict[str, Any]:
     close_streak_and_open_next(sb, open_streak, today, reason)
     return {"reset": True, "reason": reason, "events": res.get("events", [])}
 
+def _applicable_rule_rows_from_list(rule_rows: List[dict], d: dt.date) -> Dict[str, dict]:
+    """In-memory equivalent of _load_applicable_rule_rows_for_date, for use
+    in day-by-day replays where querying per-day would be too expensive."""
+    latest: Dict[str, dict] = {}
+    for r in sorted(rule_rows, key=lambda x: x["effective_from"], reverse=True):
+        k = r["rule_key"]
+        if k in latest:
+            continue
+        if _row_applies_on(r, d):
+            latest[k] = r
+    return latest
 
+
+def compute_streak_survivorship(
+    sb,
+    end_date: dt.date,
+    rule_rows: Optional[List[dict]] = None,
+) -> Dict[str, Any]:
+    """
+    For every finalized day (up to end_date) and every rule applicable that
+    day, determines whether that rule's buffer had already taken at least
+    one miss in its CURRENT window as of that day ("floor-consumed") vs
+    zero misses so far ("clean"). Aggregates overall and per-rule.
+
+    Definition: a rule is floor-consumed on day d if misses > 0 in its
+    window as of end-of-day d. Resets to clean when the window rolls over
+    (widx changes), same reset rule the live engine uses.
+    """
+    if rule_rows is None:
+        rule_rows = sb.table("rule_defs").select("*").execute().data
+
+    app_start = get_app_start_date(sb)
+    if end_date < app_start:
+        return {"overall_floor_pct": 0.0, "per_rule": []}
+
+    streak_rows = (
+        sb.table("streaks")
+        .select("streak_id,start_date,end_date,processed_through_date")
+        .order("streak_id", desc=False)
+        .execute()
+        .data
+    )
+
+    log_rows = _fetch_rule_logs_range(sb, app_start, end_date)
+    logs = {(dt.date.fromisoformat(r["log_date"]), r["rule_key"]): r["state"] for r in log_rows}
+
+    floor_days: Dict[str, int] = {}
+    total_days: Dict[str, int] = {}
+    overall_floor = 0
+    overall_total = 0
+
+    for s in streak_rows:
+        s_start = _date(s["start_date"])
+        s_effective_end = _date(s["end_date"]) if s.get("end_date") else _date(s["processed_through_date"])
+        s_effective_end = min(s_effective_end, end_date)
+
+        if s_start > s_effective_end:
+            continue
+
+        rule_state: Dict[str, dict] = {}
+        d = s_start
+        while d <= s_effective_end:
+            applicable = _applicable_rule_rows_from_list(rule_rows, d)
+            for rule_key, rdef in applicable.items():
+                window_days = int(rdef["window_days"])
+                widx = (d - s_start).days // window_days
+
+                st = rule_state.get(rule_key)
+                if not st or st["widx"] != widx:
+                    st = {"widx": widx, "misses": 0}
+
+                state = logs.get((d, rule_key), "UNKNOWN")
+                if state != "PASS":
+                    st["misses"] += 1
+
+                rule_state[rule_key] = st
+
+                is_floor = st["misses"] > 0
+
+                total_days[rule_key] = total_days.get(rule_key, 0) + 1
+                overall_total += 1
+                if is_floor:
+                    floor_days[rule_key] = floor_days.get(rule_key, 0) + 1
+                    overall_floor += 1
+
+            d += dt.timedelta(days=1)
+
+    per_rule = sorted(
+        [
+            {
+                "rule_key": k,
+                "floor_days": floor_days.get(k, 0),
+                "total_days": total_days[k],
+                "floor_pct": round(100.0 * floor_days.get(k, 0) / total_days[k], 1),
+            }
+            for k in total_days
+        ],
+        key=lambda x: -x["floor_pct"],
+    )
+
+    overall_pct = round(100.0 * overall_floor / overall_total, 1) if overall_total else 0.0
+
+    return {"overall_floor_pct": overall_pct, "per_rule": per_rule}
 
 def compute_discipline_index(sb, end_date: dt.date, window_days: int, rule_rows: Optional[List[dict]] = None) -> Dict[str, Any]:
     """
@@ -473,14 +597,8 @@ def compute_discipline_index(sb, end_date: dt.date, window_days: int, rule_rows:
         w = float(r.get("weight", 1))
         versions.setdefault(k, []).append((eff_from, eff_to, w))
 
-    log_rows = (
-        sb.table("rule_logs")
-        .select("log_date,rule_key,state")
-        .gte("log_date", start_date.isoformat())
-        .lte("log_date", end_date.isoformat())
-        .execute()
-        .data
-    )
+    log_rows = _fetch_rule_logs_range(sb, start_date, end_date)
+
     logs = {(dt.date.fromisoformat(x["log_date"]), x["rule_key"]): x["state"] for x in log_rows}
 
     idx: Dict[str, int] = {k: 0 for k in versions.keys()}
@@ -563,14 +681,8 @@ def compute_di_timeseries(
         versions.setdefault(k, []).append((eff_from, eff_to, w))
 
     # Load logs for the internal range
-    log_rows = (
-        sb.table("rule_logs")
-        .select("log_date,rule_key,state")
-        .gte("log_date", internal_start.isoformat())
-        .lte("log_date", end_date.isoformat())
-        .execute()
-        .data
-    )
+    log_rows = _fetch_rule_logs_range(sb, internal_start, end_date)
+
     logs = {(dt.date.fromisoformat(x["log_date"]), x["rule_key"]): x["state"] for x in log_rows}
 
     # Compute DI1 for every day in [internal_start..end_date]
@@ -631,6 +743,140 @@ def compute_di_timeseries(
         d += dt.timedelta(days=1)
 
     return {"rows": rows, "plot_start": plot_start, "end_date": end_date}
+
+def compute_rule_deep_dive(sb, rule_key: str, end_date: dt.date, rule_rows: Optional[List[dict]] = None) -> Dict[str, Any]:
+    """
+    Simple per-rule history: daily PASS/not-PASS from app_start to end_date,
+    plus a 7-day rolling pass rate, plus pass-rate-per-version for
+    before/after comparison across rule_defs version changes.
+    """
+    if rule_rows is None:
+        rule_rows = sb.table("rule_defs").select("*").execute().data
+
+    versions = sorted(
+        [r for r in rule_rows if r["rule_key"] == rule_key],
+        key=lambda r: r["effective_from"],
+    )
+
+    app_start = get_app_start_date(sb)
+    log_rows = _fetch_rule_logs_range(sb, app_start, end_date)
+    logs = {
+        dt.date.fromisoformat(r["log_date"]): r["state"]
+        for r in log_rows if r["rule_key"] == rule_key
+    }
+
+    daily = []
+    d = app_start
+    while d <= end_date:
+        applicable = any(_row_applies_on(v, d) for v in versions)
+        if applicable:
+            is_pass = logs.get(d) == "PASS"
+            daily.append({"date": d.isoformat(), "pass": 1 if is_pass else 0})
+        d += dt.timedelta(days=1)
+
+    # 7-day rolling pass rate
+    for i, row in enumerate(daily):
+        window = daily[max(0, i - 6): i + 1]
+        row["rolling_7d_pct"] = round(100.0 * sum(x["pass"] for x in window) / len(window), 1)
+
+    # per-version pass rate
+    version_summary = []
+    for v in versions:
+        v_from = _date(v["effective_from"])
+        v_to = _date(v["effective_to"]) if v.get("effective_to") else end_date
+        v_to = min(v_to, end_date)
+        days_in_version = [row for row in daily if v_from.isoformat() <= row["date"] <= v_to.isoformat()]
+        if days_in_version:
+            pass_rate = round(100.0 * sum(r["pass"] for r in days_in_version) / len(days_in_version), 1)
+        else:
+            pass_rate = None
+        version_summary.append({
+            "version": v["version"],
+            "effective_from": v["effective_from"],
+            "effective_to": v.get("effective_to") or "ongoing",
+            "window_days": v["window_days"],
+            "buffer_misses": v["buffer_misses"],
+            "days_tracked": len(days_in_version),
+            "pass_rate_pct": pass_rate,
+        })
+
+    return {"daily": daily, "version_summary": version_summary}
+
+def compute_closure_breakdown(sb, end_date: dt.date) -> Dict[str, Any]:
+    """
+    Splits closed streaks by end_reason_json->>'type' and reports:
+      - count and avg length per closure type
+      - frequency of each rule_key appearing in broken_rules across ALL
+        RULE_BREAK closures (not just the first-alphabetical rule, now
+        that broken_rules captures every co-failing rule)
+      - co-failure groups: for streaks with >1 broken rule, which rule
+        pairs occurred together, and how often
+    Only considers streaks with end_date <= end_date param, so this
+    respects "finalized" the same way the rest of the app does.
+    """
+    streak_rows = (
+        sb.table("streaks")
+        .select("streak_id,start_date,end_date,end_reason_json")
+        .not_.is_("end_date", "null")
+        .lte("end_date", end_date.isoformat())
+        .execute()
+        .data
+    )
+
+    by_type: Dict[str, List[int]] = {}  # type -> list of streak lengths
+    rule_break_count: Dict[str, int] = {}
+    pair_count: Dict[Tuple[str, str], int] = {}
+
+    for r in streak_rows:
+        reason = r.get("end_reason_json") or {}
+        closure_type = reason.get("type") or "UNKNOWN"
+
+        s = _date(r["start_date"])
+        e = _date(r["end_date"])
+        length = (e - s).days + 1
+
+        by_type.setdefault(closure_type, []).append(length)
+
+        broken = reason.get("broken_rules") or []
+        keys = sorted({b["rule_key"] for b in broken})
+
+        for k in keys:
+            rule_break_count[k] = rule_break_count.get(k, 0) + 1
+
+        if len(keys) > 1:
+            for i in range(len(keys)):
+                for j in range(i + 1, len(keys)):
+                    pair = (keys[i], keys[j])
+                    pair_count[pair] = pair_count.get(pair, 0) + 1
+
+    def _mean(xs): return float(stats.mean(xs)) if xs else 0.0
+
+    type_summary = [
+        {
+            "type": t,
+            "count": len(lengths),
+            "avg_length": round(_mean(lengths), 2),
+            "min_length": min(lengths) if lengths else 0,
+            "max_length": max(lengths) if lengths else 0,
+        }
+        for t, lengths in sorted(by_type.items())
+    ]
+
+    rule_freq = sorted(
+        [{"rule_key": k, "times_broke_streak": v} for k, v in rule_break_count.items()],
+        key=lambda x: -x["times_broke_streak"],
+    )
+
+    pair_freq = sorted(
+        [{"rule_a": p[0], "rule_b": p[1], "co_occurrences": v} for p, v in pair_count.items()],
+        key=lambda x: -x["co_occurrences"],
+    )
+
+    return {
+        "type_summary": type_summary,
+        "rule_freq": rule_freq,
+        "pair_freq": pair_freq,
+    }
 
 def compute_statistics(
     sb,
@@ -711,14 +957,8 @@ def compute_statistics(
         versions.setdefault(k, []).append((eff_from, eff_to, nm, wt))
 
     # ---------- Logs ----------
-    log_rows = (
-        sb.table("rule_logs")
-        .select("log_date,rule_key,state")
-        .gte("log_date", app_start.isoformat())
-        .lte("log_date", end_date.isoformat())
-        .execute()
-        .data
-    )
+    log_rows = _fetch_rule_logs_range(sb, app_start, end_date)
+
     logs = {(dt.date.fromisoformat(x["log_date"]), x["rule_key"]): x["state"] for x in log_rows}
 
     # ---------- Middle: per-rule consistency over last N finalized days ----------
